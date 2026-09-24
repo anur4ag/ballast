@@ -1,4 +1,4 @@
-use super::{age, bytes, clean, number, summary};
+use super::{age, bytes, clean, number};
 use crate::daemon::{
     Snapshot,
     files::Paths,
@@ -10,13 +10,18 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
-use std::sync::{Arc, mpsc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
 pub(super) struct Cpu {
@@ -32,8 +37,9 @@ impl Cpu {
         }
         self.values.clear();
         let elapsed = snapshot.status.sampled_at_ms.checked_sub(self.sampled_at);
-        let valid =
-            !snapshot.status.sample_discarded && elapsed.is_some_and(|ms| ms > 0 && ms <= 5000);
+        let valid = snapshot.boot_id == self.boot_id
+            && !snapshot.status.sample_discarded
+            && elapsed.is_some_and(|ms| ms > 0 && ms <= 5000);
         let mut next = HashMap::new();
         for p in &snapshot.processes {
             if let Some(metrics) = p.metrics {
@@ -58,15 +64,29 @@ impl Cpu {
         self.sampled_at = snapshot.status.sampled_at_ms;
         self.boot_id.clone_from(&snapshot.boot_id);
     }
-    fn total(&self, ids: impl Iterator<Item = ProcessIdentity>) -> Option<f64> {
+    fn total(&self, ids: impl Iterator<Item = ProcessIdentity>) -> String {
         let mut total = 0.0;
         let mut any = false;
+        let mut partial = false;
         for id in ids {
-            total += self.values.get(&id)?;
-            any = true;
+            if let Some(value) = self.values.get(&id) {
+                total += value;
+                any = true;
+            } else {
+                partial = true;
+            }
         }
-        any.then_some(total)
+        if any {
+            format!("{total:.1}{}", if partial { "~" } else { "" })
+        } else {
+            "?".into()
+        }
     }
+}
+
+static QUIT: AtomicBool = AtomicBool::new(false);
+extern "C" fn request_quit(_: libc::c_int) {
+    QUIT.store(true, Ordering::Relaxed);
 }
 
 pub fn run() -> io::Result<()> {
@@ -113,6 +133,14 @@ pub fn run() -> io::Result<()> {
                 }
             }
         })?;
+    QUIT.store(false, Ordering::Relaxed);
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        if unsafe { libc::signal(signal, request_quit as *const () as libc::sighandler_t) }
+            == libc::SIG_ERR
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
     let mut terminal = ratatui::try_init()?;
     let result = (|| {
         let mut snapshot: Option<Arc<Snapshot>> = None;
@@ -122,7 +150,7 @@ pub fn run() -> io::Result<()> {
         let mut redraw = true;
         let mut last_draw = Instant::now();
         let mut previous_view = None;
-        loop {
+        while !QUIT.load(Ordering::Relaxed) {
             while let Ok(result) = receive.try_recv() {
                 match result {
                     Ok(next) => {
@@ -190,71 +218,205 @@ pub fn run() -> io::Result<()> {
     result
 }
 
+// These accents exceed 4.5:1 on both black and white; text labels also convey state.
+const NORMAL: Color = Color::Rgb(32, 134, 77);
+const ELEVATED: Color = Color::Rgb(151, 111, 0);
+const CRITICAL: Color = Color::Rgb(208, 68, 61);
+const FROZEN: Color = Color::Rgb(50, 121, 186);
+const HELD: Color = Color::Rgb(163, 90, 165);
+
 fn heading(text: impl Into<String>) -> Line<'static> {
     Line::from(text.into()).style(Style::default().add_modifier(Modifier::BOLD))
 }
-fn alert(text: impl Into<String>) -> Line<'static> {
-    Line::from(text.into()).style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
+fn accent(text: impl Into<String>, color: Color) -> Span<'static> {
+    Span::styled(
+        text.into(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
+}
+fn count(n: usize, name: &str) -> String {
+    format!("{n} {name}{}", if n == 1 { "" } else { "s" })
+}
+fn cell(text: &str, width: usize, right: bool) -> String {
+    let text = clean(text);
+    let clipped = Line::from(text.as_str()).width() > width;
+    let budget = width.saturating_sub(usize::from(clipped));
+    let mut content = String::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true) {
+        let n = Line::from(grapheme).width();
+        if used + n > budget {
+            break;
+        }
+        content.push_str(grapheme);
+        used += n;
+    }
+    let text = content;
+    let suffix = if clipped && width > 0 { "…" } else { "" };
+    let padding = " ".repeat(width.saturating_sub(used + suffix.len().min(1)));
+    if right {
+        format!("{padding}{text}{suffix}")
+    } else {
+        format!("{text}{suffix}{padding}")
+    }
 }
 
 #[derive(PartialEq)]
 struct View {
-    title: String,
-    banner: Line<'static>,
+    header: Vec<Line<'static>>,
     lines: Vec<Line<'static>>,
 }
-fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16, now: u64) -> View {
-    let title = snapshot.map_or_else(
-        || "BALLAST connecting...".into(),
-        |s| {
-            if width < 32 {
-                format!(
-                    "{:?} F{} H{}",
-                    s.status.pressure_level,
-                    s.frozen.len(),
-                    s.held.len()
-                )
-            } else if width < 64 {
-                format!(
-                    "BALLAST {:?} F:{} H:{}",
-                    s.status.pressure_level,
-                    s.frozen.len(),
-                    s.held.len()
-                )
-            } else {
-                format!(
-                    "BALLAST  {:?}  {:?}  {} frozen  {} held",
-                    s.status.mode,
-                    s.status.pressure_level,
-                    s.frozen.len(),
-                    s.held.len()
-                )
-            }
-        },
-    );
-    let stale = snapshot.is_some_and(|s| now.saturating_sub(s.status.sampled_at_ms) > 3000);
-    let banner = if let Some(error) = error {
-        alert(clean(error))
-    } else if stale {
-        alert("STALE snapshot; waiting for a fresh daemon sample")
-    } else {
-        Line::from(if width >= 64 {
-            "Live fleet | CPU: one core = 100% | ? unknown, ~ partial"
-        } else {
-            "Live | ? unknown, ~ partial"
-        })
+
+fn meter(
+    name: &str,
+    used: Option<u64>,
+    total: Option<u64>,
+    width: usize,
+    color: Color,
+) -> Line<'static> {
+    if total == Some(0) {
+        return Line::from(format!("{name:<4}  no swap"));
+    }
+    let label = format!("{} / {}", bytes(used), bytes(total));
+    let bars = width.saturating_sub(label.len() + 10).clamp(3, 40);
+    let filled = used
+        .zip(total)
+        .filter(|(_, total)| *total > 0)
+        .map(|(used, total)| {
+            ((used.min(total) as f64 / total as f64) * bars as f64).round() as usize
+        });
+    let inside = match filled {
+        Some(n) => vec![
+            accent("|".repeat(n), color),
+            Span::raw("·".repeat(bars - n)),
+        ],
+        None => vec![Span::raw(cell("?", bars, false))],
     };
-    let lines = snapshot
-        .map(|s| lines(s, cpu, width, now))
-        .unwrap_or_else(|| vec![Line::from("Start with: ballast daemon")]);
+    let mut spans = vec![Span::raw(format!("{name:<4} ["))];
+    spans.extend(inside);
+    spans.push(Span::raw(format!("] {label}")));
+    Line::from(spans)
+}
+
+fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16, now: u64) -> View {
+    let Some(s) = snapshot else {
+        return View {
+            header: vec![
+                heading("BALLAST"),
+                Line::from(accent(
+                    error
+                        .map(clean)
+                        .unwrap_or_else(|| "Connecting to daemon…".into()),
+                    CRITICAL,
+                )),
+            ],
+            lines: vec![Line::from("Start with: ballast daemon")],
+        };
+    };
+    let color = match s.status.pressure_level {
+        crate::guardian::Level::Normal => NORMAL,
+        crate::guardian::Level::Elevated => ELEVATED,
+        crate::guardian::Level::Critical => CRITICAL,
+    };
+    let mut header = vec![Line::from(vec![
+        Span::styled("BALLAST  ", Style::default().add_modifier(Modifier::BOLD)),
+        accent(
+            format!("{:?}", s.status.pressure_level).to_uppercase(),
+            color,
+        ),
+        Span::raw(format!(
+            "  {:?}  ·  {} frozen  {} held",
+            s.status.mode,
+            s.frozen.len(),
+            s.held.len()
+        )),
+    ])];
+    let p = s.pressure.as_ref();
+    let mem = meter(
+        "MEM",
+        p.and_then(|p| p.used_memory_bytes),
+        p.and_then(|p| p.total_memory_bytes),
+        if width >= 110 {
+            (width as usize - 3) / 2
+        } else {
+            width as usize
+        },
+        color,
+    );
+    let swap = meter(
+        "SWAP",
+        p.and_then(|p| p.swap_used_bytes),
+        p.and_then(|p| p.swap_total_bytes),
+        if width >= 110 {
+            (width as usize - 3) / 2
+        } else {
+            width as usize
+        },
+        HELD,
+    );
+    if width >= 110 {
+        let padding = (width as usize / 2).saturating_sub(mem.width());
+        let mut line = mem;
+        line.spans.push(Span::raw(" ".repeat(padding)));
+        line.spans.extend(swap.spans);
+        header.push(line);
+    } else {
+        header.extend([mem, swap]);
+    }
+    if let Some(p) = p {
+        let mut inputs = Vec::new();
+        if let Some(kernel) = p.kernel_pressure_level {
+            inputs.push(format!(
+                "kernel {}",
+                match kernel {
+                    1 => "normal",
+                    2 => "warn",
+                    4 => "critical",
+                    _ => "unknown",
+                }
+            ));
+        }
+        if p.psi_some_avg10.is_some() || p.psi_full_avg10.is_some() {
+            inputs.push(format!(
+                "PSI some {}% / full {}%",
+                number(p.psi_some_avg10),
+                number(p.psi_full_avg10)
+            ));
+        }
+        if p.kernel_pressure_level.is_some() {
+            inputs.push(format!(
+                "pageout {} · swapout {} MiB/s",
+                number(s.guardian.as_ref().and_then(|n| n.pageout_mib_per_sec)),
+                number(s.guardian.as_ref().and_then(|n| n.swapout_mib_per_sec))
+            ));
+        }
+        header.push(Line::from(inputs.join("  ·  ")));
+    }
+    if let Some(error) = error {
+        header.push(Line::from(accent(clean(error), CRITICAL)));
+    } else if now.saturating_sub(s.status.sampled_at_ms) > 3000 {
+        header.push(Line::from(accent(
+            "STALE snapshot; waiting for a fresh sample",
+            CRITICAL,
+        )));
+    } else if s.status.sample_discarded || s.pressure.is_none() {
+        header.push(Line::from(accent(
+            "Pressure unavailable; level is last known",
+            ELEVATED,
+        )));
+    }
+    if let Some(note) = &s.guardian {
+        header.push(Line::from(format!("Guardian: {}", clean(&note.message))));
+    }
+    if let Some(error) = &s.status.last_error {
+        header.push(Line::from(accent(
+            format!("Last error: {}", clean(error)),
+            CRITICAL,
+        )));
+    }
     View {
-        title,
-        banner,
-        lines,
+        header,
+        lines: lines(s, cpu, width, now),
     }
 }
 
@@ -279,196 +441,326 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
     if area.is_empty() {
         return;
     }
-    frame.render_widget(
-        Paragraph::new(heading(view.title.clone())),
-        Rect::new(0, 0, area.width, 1),
-    );
-    if area.height < 3 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(view.banner.clone()),
-        Rect::new(0, 1, area.width, 1),
-    );
-    let body = Rect::new(0, 2, area.width, area.height.saturating_sub(3));
+    let header = Paragraph::new(view.header.clone()).wrap(Wrap { trim: false });
+    let header_height = (header.line_count(area.width) as u16).min(area.height.saturating_sub(3));
+    frame.render_widget(header, Rect::new(0, 0, area.width, header_height));
     let paragraph = Paragraph::new(view.lines.clone()).wrap(Wrap { trim: false });
-    // line_count accounts for Unicode area.width and wrapping, so End reaches all details.
-    let count = paragraph.line_count(body.width).min(u16::MAX as usize) as u16;
-    *scroll = (*scroll).min(count.saturating_sub(body.height));
-    frame.render_widget(paragraph.scroll((*scroll, 0)), body);
-    let footer = if area.width >= 64 {
-        format!(
-            " q quit  j/k scroll  PgUp/PgDn  Home/End  |  rows {}-{} / {}",
-            *scroll + 1,
-            scroll.saturating_add(body.height).min(count),
-            count
-        )
+    let count = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
+    let height = area.height.saturating_sub(header_height + 3).min(count);
+    *scroll = (*scroll).min(count.saturating_sub(height));
+    frame.render_widget(
+        paragraph.scroll((*scroll, 0)),
+        Rect::new(0, header_height, area.width, height),
+    );
+    let footer = if area.width >= 110 {
+        vec![
+            Line::from("─".repeat(area.width as usize)),
+            Line::from(
+                "q quit  j/k scroll  PgUp/PgDn  Home/End   ·   CPU: one core = 100%   ? unknown   ~ partial",
+            ),
+            Line::from(format!(
+                "ballast resume <id>|--all  ·  ballast stop <id>  ·  rows {}-{} / {count}",
+                scroll.saturating_add(1).min(count),
+                scroll.saturating_add(height).min(count)
+            )),
+        ]
     } else {
-        "q quit  j/k scroll  g/G start/end".into()
+        vec![
+            Line::from("─".repeat(area.width as usize)),
+            Line::from(
+                "q quit  j/k scroll  g/G start/end  ·  CPU 100%=1 core  ? unknown  ~ partial",
+            ),
+            Line::from("ballast resume <id>|--all  ·  ballast stop <id>"),
+        ]
     };
     frame.render_widget(
-        Paragraph::new(heading(footer)),
-        Rect::new(0, area.height - 1, area.width, 1),
+        Paragraph::new(footer),
+        Rect::new(
+            0,
+            header_height + height,
+            area.width,
+            area.height.saturating_sub(header_height + height),
+        ),
     );
 }
 
-fn lines(snapshot: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
-    let mut out: Vec<_> = summary(snapshot)
-        .into_iter()
-        .skip(1)
-        .map(Line::from)
-        .collect();
-    if width < 64 {
-        out.insert(
-            0,
-            Line::from(format!(
-                "Mode: {:?} | CPU: one core = 100%",
-                snapshot.status.mode
-            )),
-        );
+fn row(
+    values: &[String],
+    widths: &[usize],
+    bold: bool,
+    state_color: Option<Color>,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (text, width)) in values.iter().zip(widths).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let value = cell(text, *width, (2..=4).contains(&i));
+        spans.push(match state_color.filter(|_| i == 0) {
+            Some(color) => accent(value, color),
+            None => Span::raw(value),
+        });
     }
-    if !snapshot.frozen.is_empty() || !snapshot.held.is_empty() {
-        out.push(Line::default());
+    let mut line = Line::from(spans);
+    if bold {
+        line = line.style(Style::default().add_modifier(Modifier::BOLD));
+    }
+    line
+}
+
+fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let observe = matches!(s.status.mode, crate::daemon::files::Mode::Observe);
+    if !s.frozen.is_empty() || !s.held.is_empty() {
         out.push(heading("PAUSED & WAITING"));
-        for frozen in &snapshot.frozen {
-            out.push(alert(format!(
-                "{} {}  for {}",
-                if matches!(snapshot.status.mode, crate::daemon::files::Mode::Observe) {
-                    "SIMULATED FREEZE"
-                } else {
-                    "FROZEN"
-                },
-                clean(&frozen.workload_id),
-                age(now, frozen.frozen_at_ms)
-            )));
-            out.push(Line::from(
-                if matches!(snapshot.status.mode, crate::daemon::files::Mode::Observe) {
-                    "  Observe mode: no signal sent. Reason: memory pressure."
-                } else {
-                    "  Guardian: memory pressure. Resume: ballast resume <id>"
-                },
-            ));
+        for frozen in &s.frozen {
+            let work = s
+                .attribution
+                .workloads
+                .iter()
+                .find(|w| w.id == frozen.workload_id);
+            let agent = work.and_then(|w| s.attribution.agents.iter().find(|a| a.id == w.agent_id));
+            let name = agent
+                .map(|a| format!("{}/{}", a.kind, a.id))
+                .unwrap_or_else(|| "unknown agent".into());
+            let label = work.map_or(frozen.workload_id.as_str(), |w| &w.label);
+            out.push(Line::from(vec![
+                accent(
+                    if observe {
+                        "SIMULATED FREEZE  "
+                    } else {
+                        "FROZEN  "
+                    },
+                    FROZEN,
+                ),
+                Span::raw(format!(
+                    "{}  {}  {}  {}",
+                    clean(&name),
+                    clean(label),
+                    age(now, frozen.frozen_at_ms),
+                    if observe {
+                        "memory pressure; no signal sent"
+                    } else {
+                        "memory pressure"
+                    }
+                )),
+            ]));
         }
-        for held in &snapshot.held {
-            out.push(alert(format!(
-                "HELD {}:{}  for {}",
-                clean(&held.agent),
-                clean(&held.session_id),
-                age(now, held.since_ms)
-            )));
-            out.push(Line::from(format!("  Admission: {}", clean(&held.reason))));
-            out.push(Line::from(format!("  {}", clean(&held.label))));
+        for held in &s.held {
+            out.push(Line::from(vec![
+                accent("HELD    ", HELD),
+                Span::raw(format!(
+                    "{}/{}  {}  {}  {}",
+                    clean(&held.agent),
+                    clean(&held.session_id),
+                    clean(&held.label),
+                    age(now, held.since_ms),
+                    clean(&held.reason).replace("; waiting for admission", "")
+                )),
+            ]));
         }
     }
-    out.push(Line::default());
+    if !s.status.cleanup_pending.is_empty() {
+        out.push(Line::from(format!(
+            "Cleanup pending: {}",
+            clean(&s.status.cleanup_pending.join(", "))
+        )));
+    }
     out.push(heading(format!(
-        "FLEET  {} owners / {} agents / {} workloads",
-        snapshot.attribution.owners.len(),
-        snapshot.attribution.agents.len(),
-        snapshot.attribution.workloads.len()
+        "FLEET  {} · {} · {}",
+        count(s.attribution.owners.len(), "owner"),
+        count(s.attribution.agents.len(), "agent"),
+        count(s.attribution.workloads.len(), "workload")
     )));
-    let mut agents: Vec<_> = snapshot.attribution.agents.iter().collect();
+    let wide = width >= 110;
+    let widths = if wide {
+        let id = ((width as usize - 80) / 2).clamp(20, 40);
+        vec![10, 7, 7, 11, 7, id, width as usize - 48 - id]
+    } else if width >= 64 {
+        vec![8, 6, 7, 7, 6, width as usize - 39]
+    } else {
+        vec![]
+    };
+    if !widths.is_empty() {
+        let headers = if wide {
+            vec!["STATE", "CLASS", "CPU%", "MEM", "AGE", "ID", "LABEL"]
+        } else {
+            vec!["STATE", "CLASS", "CPU%", "MEM", "AGE", "WORKLOAD / ID"]
+        };
+        out.push(row(
+            &headers.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            &widths,
+            true,
+            None,
+        ));
+    }
+    let memory = |m: &crate::attribution::MemorySummary| {
+        format!(
+            "{}{}",
+            bytes(Some(m.bytes))
+                .replace(" GiB", "G")
+                .replace(" MiB", "M"),
+            if m.complete { "" } else { "~" }
+        )
+    };
+    let mut agents: Vec<_> = s.attribution.agents.iter().collect();
     agents.sort_by_key(|a| (&a.owner_id, &a.id));
     let mut last_owner = None;
     for agent in agents {
         if last_owner != Some(&agent.owner_id) {
-            let owner = snapshot
+            let owner = s
                 .attribution
                 .owners
                 .iter()
                 .find(|o| Some(&o.id) == agent.owner_id.as_ref());
             out.push(heading(format!(
-                "OWNER {}",
-                owner
-                    .map(|o| clean(o.name.as_deref().unwrap_or(&o.id)))
-                    .unwrap_or_else(|| agent
-                        .owner_id
-                        .as_deref()
-                        .map(clean)
-                        .unwrap_or_else(|| "unassigned".into()))
+                "▾ {}",
+                clean(
+                    owner
+                        .map(|o| o.name.as_deref().unwrap_or(&o.id))
+                        .unwrap_or_else(|| agent.owner_id.as_deref().unwrap_or("unassigned"))
+                )
             )));
             last_owner = Some(&agent.owner_id);
         }
-        out.push(heading(format!(
-            "  {} [{}] {}",
-            clean(&agent.kind),
-            format!("{:?}", agent.state).to_lowercase(),
-            clean(&agent.id)
-        )));
-        let used_cpu = cpu.total(
-            snapshot
-                .attribution
+        let percent = cpu.total(
+            s.attribution
                 .processes
                 .iter()
                 .filter(|p| p.agent_id.as_deref() == Some(&agent.id))
                 .map(|p| p.identity),
         );
-        out.push(Line::from(format!(
-            "  CPU {}%  memory {}{}",
-            number(used_cpu),
-            bytes(Some(agent.memory.bytes)),
-            if agent.memory.complete { "" } else { "~" }
-        )));
-        let mut workloads: Vec<_> = snapshot
+        let mut values = vec![
+            format!("{:?}", agent.state).to_lowercase(),
+            "agent".into(),
+            percent,
+            memory(&agent.memory),
+            "-".into(),
+        ];
+        if wide {
+            values.extend([agent.id.clone(), format!("└ {}", agent.kind)]);
+        } else {
+            values.push(format!("└ {} [{}]", agent.kind, agent.id));
+        }
+        if widths.is_empty() {
+            out.push(heading(format!(
+                "{} [{}] {}  {}% {}",
+                clean(&agent.kind),
+                values[0],
+                clean(&agent.id),
+                values[2],
+                values[3]
+            )));
+        } else {
+            out.push(row(&values, &widths, true, None));
+        }
+        let mut workloads: Vec<_> = s
             .attribution
             .workloads
             .iter()
             .filter(|w| w.agent_id == agent.id)
             .collect();
         workloads.sort_by_key(|w| &w.id);
-        if !workloads.is_empty() && width >= 64 {
-            out.push(heading(format!(
-                "    {:<7} {:>7} {:>11}  WORKLOAD",
-                "CLASS", "CPU%", "MEMORY"
-            )));
-        }
         for w in workloads {
             let percent = cpu.total(
-                snapshot
-                    .attribution
+                s.attribution
                     .processes
                     .iter()
                     .filter(|p| p.workload_id.as_deref() == Some(&w.id))
                     .map(|p| p.identity),
             );
-            let memory = format!(
-                "{}{}",
-                bytes(Some(w.memory.bytes)),
-                if w.memory.complete { "" } else { "~" }
-            );
-            let class = format!("{:?}", w.class).to_lowercase();
-            let frozen = snapshot.frozen.iter().any(|f| f.workload_id == w.id);
-            let state = if !frozen {
-                ""
-            } else if matches!(snapshot.status.mode, crate::daemon::files::Mode::Observe) {
-                " [WOULD FREEZE]"
+            let frozen = s.frozen.iter().any(|f| f.workload_id == w.id);
+            let state = if frozen {
+                if observe { "SIMULATED" } else { "FROZEN" }
             } else {
-                " [FROZEN]"
+                "running"
             };
-            let row = if width >= 64 {
-                format!(
-                    "    {class:<7} {:>7} {memory:>11}  {}{state}",
-                    number(percent),
-                    clean(&w.label)
-                )
+            let mut values = vec![
+                state.into(),
+                format!("{:?}", w.class).to_lowercase(),
+                percent,
+                memory(&w.memory),
+                age(now, w.first_seen_ms),
+            ];
+            if wide {
+                values.extend([w.id.clone(), format!("  └ {}", w.label)]);
             } else {
-                format!("    {class} | {}% | {memory}{state}", number(percent))
-            };
-            out.push(if frozen { alert(row) } else { Line::from(row) });
-            if width < 64 {
-                out.push(Line::from(format!("    {}", clean(&w.label))));
+                values.push(format!("  {} [{}]", w.label, w.id));
             }
-            out.push(Line::from(format!("    id: {}", clean(&w.id))));
+            if widths.is_empty() {
+                out.push(Line::from(vec![
+                    accent(format!("  {state}"), if frozen { FROZEN } else { NORMAL }),
+                    Span::raw(format!(
+                        " {} {}% {} {}",
+                        values[1], values[2], values[3], values[4]
+                    )),
+                ]));
+                out.push(Line::from(format!(
+                    "  {} [{}]",
+                    clean(&w.label),
+                    clean(&w.id)
+                )));
+            } else {
+                out.push(row(&values, &widths, false, frozen.then_some(FROZEN)));
+            }
         }
     }
-    if snapshot.attribution.agents.is_empty() {
+    if s.attribution.agents.is_empty() {
         out.push(Line::from(
             "No agents detected. Waiting for agent activity.",
         ));
     }
-    out.push(Line::default());
-    out.push(Line::from(
-        "Controls: ballast resume <id>|--all   ballast stop <id>",
-    ));
     out
+}
+
+#[cfg(test)]
+#[test]
+fn unicode_columns_and_semantic_accents_remain_legible() {
+    for text in ["界界界", "e\u{301}cole", "👩‍💻 build", "a\x1b[2J"] {
+        for width in 0..12 {
+            for right in [false, true] {
+                assert_eq!(Line::from(cell(text, width, right)).width(), width);
+            }
+        }
+    }
+    for color in [NORMAL, ELEVATED, CRITICAL, FROZEN, HELD] {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("explicit accent expected")
+        };
+        let linear = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        assert!((luminance + 0.05) / 0.05 >= 4.5);
+        assert!(1.05 / (luminance + 0.05) >= 4.5);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn cpu_totals_keep_known_members_and_mark_partial() {
+    let known = ProcessIdentity {
+        pid: 1,
+        start_time: 1,
+    };
+    let new_or_unreadable = ProcessIdentity {
+        pid: 2,
+        start_time: 1,
+    };
+    let mut cpu = Cpu::default();
+    cpu.values.insert(known, 50.0);
+    assert_eq!(cpu.total([known].into_iter()), "50.0");
+    assert_eq!(cpu.total([known, new_or_unreadable].into_iter()), "50.0~");
+    assert_eq!(cpu.total([new_or_unreadable].into_iter()), "?");
+    assert_eq!(cpu.total(std::iter::empty()), "?");
+    cpu.values.insert(known, 1000.0);
+    assert_eq!(
+        cell(&cpu.total([known, new_or_unreadable].into_iter()), 7, true),
+        "1000.0~"
+    );
 }

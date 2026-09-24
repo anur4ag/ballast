@@ -167,12 +167,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             root: process.identity,
             label: format!("synthetic workload {}", i + 1),
             class: WorkloadClass::Batch,
-            first_seen_ms: i as u64,
+            first_seen_ms: ballast::daemon::unix_ms() + i as u64,
             detached_pgid: None,
             memory: MemorySummary {
                 bytes: 0,
                 complete: true,
-                growth_30s_bytes: Some(i as i64),
+                growth_30s_bytes: (i > 0).then_some(i as i64),
             },
         });
         snapshot.attribution.processes.push(ProcessAttribution {
@@ -199,6 +199,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot.status.tick += 1;
         snapshot.status.sampled_at_ms = ballast::daemon::unix_ms();
         snapshot.processes = platform.list_processes(&identities, &identities)?;
+        snapshot.processes.sort_by_key(|p| p.identity);
+        // Synthetic footprints exercise filled meters without allocating real pressure.
+        for (i, process) in snapshot.processes.iter_mut().enumerate() {
+            if let Some(metrics) = &mut process.metrics {
+                metrics.memory_bytes = (3 - i as u64) << 30;
+            }
+        }
         for agent in &mut snapshot.attribution.agents {
             agent.memory = MemorySummary {
                 complete: true,
@@ -233,8 +240,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot.pressure = Some(PressureInputs {
             page_size: 4096,
             total_memory_bytes: Some(16 << 30),
-            used_memory_bytes: Some(1),
-            swap_used_bytes: Some(0),
+            used_memory_bytes: Some(8 << 30),
+            swap_used_bytes: Some(1 << 30),
+            swap_total_bytes: Some(4 << 30),
             kernel_pressure_level: Some(level),
             ..Default::default()
         });

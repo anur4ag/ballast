@@ -5,17 +5,23 @@ It polls once per second (or the daemon interval if slower); keyboard input rema
 Press `q`, Escape or Ctrl-C to exit; arrows or `j`/`k` scroll; Page Up/Down and Home/End navigate longer fleets.
 Use `ballast resume <workload-id>|--all` or `ballast stop <agent-id>|<workload-id>` from another terminal.
 The view is read-only.
+External SIGTERM, SIGINT and SIGHUP exit through terminal restoration.
 
-Colors inherit the terminal's foreground and background, with bold headings and ANSI yellow for paused/waiting work and warnings.
+Colors inherit the terminal's foreground and background, with semantic accents: green Normal, ochre Elevated, red Critical, blue frozen and magenta held.
+`NO_COLOR` disables accents; state labels remain explicit.
 Unchanged views skip drawing, and Ratatui sends changed cells only.
-Narrow terminals wrap details and switch workload metrics to stacked rows below 64 columns.
-Full IDs remain available by scrolling and through `ps`.
+At 110 columns the fleet uses separate state, class, CPU, memory, age, ID and label columns.
+From 64 columns it combines workload labels and IDs; smaller terminals stack metrics.
+Text clips at grapheme boundaries; full IDs remain available through `ps`.
+Memory and swap meters show used/total; a zero swap total displays `no swap`.
 
 CPU is a delta between valid samples, where one busy core is 100% and multiple cores may exceed 100%.
 Agent CPU includes all attributed members; workload CPU includes only that workload's members.
-`?` means an unavailable measurement or a warming CPU baseline; `~` marks partial memory totals.
-The baseline resets on discarded samples, identity changes, decreasing counters and gaps above five seconds.
+`?` means an unavailable measurement or a warming CPU baseline; `~` marks partial CPU or memory totals.
+CPU sums available member deltas and shows `?` only when none is available.
+The baseline resets on discarded samples, boot or identity changes, decreasing counters and gaps above five seconds.
 Memory is physical footprint on macOS and RSS on Linux.
+Compact table units M and G mean MiB and GiB.
 The guardian supplies pressure rates and explanations; the view never recomputes policy.
 The level can lag the raw kernel/PSI signal because guardian hysteresis is intentional.
 
@@ -72,7 +78,7 @@ Metrics contain integer `memory_bytes` and cumulative `cpu_time_ns`, never a per
 Environment contents are never serialized.
 `argv`, workload labels and held-command labels can contain command text; treat output as private and terminal text as untrusted.
 
-Pressure contains integer `page_size`, nullable byte counts `total_memory_bytes`, `used_memory_bytes`, `swap_used_bytes`, nullable page counters `pageouts`, `swapins`, `swapouts`, nullable integer `kernel_pressure_level`, and nullable numbers `psi_some_avg10`, `psi_full_avg10`.
+Pressure contains integer `page_size`, nullable byte counts `total_memory_bytes`, `used_memory_bytes`, `swap_used_bytes`, `swap_total_bytes`, nullable page counters `pageouts`, `swapins`, `swapouts`, nullable integer `kernel_pressure_level`, and nullable numbers `psi_some_avg10`, `psi_full_avg10`.
 Kernel values 1/2/4 mean normal/warn/critical; PSI averages are percentages.
 Guardian rates are MiB/s; agent memory share is a ratio, not a percentage, and null when the decision did not evaluate it.
 Decision kinds currently include `monitoring`, `normal`, `elevated`, `unknown_pressure`, `cooldown`, `non_agent_pressure`, `no_eligible_workload`, `last_batch_not_fastest`, `froze`, `freeze_failed`, and `resumed`.
@@ -90,7 +96,7 @@ All times and counters are integers unless explicitly documented as ratios/rates
 Null means unknown, not zero.
 IDs are opaque; consumers must not parse their internal punctuation or depend on array order, except for admission ordering in `held`.
 New fields can be added in version 1; ignore unknown fields.
-Older version-1 daemons may omit `held` and `guardian`; interpret them as empty and unavailable respectively.
+Older version-1 daemons may omit `held`, `guardian` and `pressure.swap_total_bytes`; interpret them as empty, unavailable and unknown respectively.
 Existing field removal or incompatible type/meaning changes require a new protocol version.
 Connection/protocol errors exit nonzero, with diagnostics on stderr and no successful JSON object on stdout.
 Plain `ps` keeps one escaped record per line and includes cumulative process `cpu_ns`, frozen duration, admission wait/reason, guardian message, and pending cleanup IDs.
@@ -104,5 +110,5 @@ python3 spikes/verify_top.py
 ```
 
 This uses tmux, a temporary Ballast home, production IPC/admission/guardian code, synthetic pressure, and three test-owned sleep processes.
-It captures 80- and 160-column light/dark panes under the ignored `spikes/out/t09` directory, then verifies admission and resume after pressure returns to Normal.
+It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/t09` directory, then verifies admission and resume after pressure returns to Normal.
 The fixture accepts `exit` in its pressure file, thaws on normal exit, and also exits after 150 seconds.

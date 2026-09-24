@@ -316,6 +316,7 @@ impl Platform for NativePlatform {
             .get("MemTotal")
             .zip(values.get("MemAvailable"))
             .map(|(total, available)| total.saturating_sub(*available));
+        inputs.swap_total_bytes = values.get("SwapTotal").copied();
         inputs.swap_used_bytes = values
             .get("SwapTotal")
             .zip(values.get("SwapFree"))

@@ -294,6 +294,7 @@ impl Platform for NativePlatform {
             total_memory_bytes: total,
             used_memory_bytes: Some(used_pages.saturating_mul(self.page_size)),
             swap_used_bytes: swap.map(|s| s.xsu_used),
+            swap_total_bytes: swap.map(|s| s.xsu_total),
             kernel_pressure_level: sysctl_value(c"kern.memorystatus_vm_pressure_level").ok(),
             pageouts: Some(stats.pageouts),
             swapins: Some(stats.swapins),

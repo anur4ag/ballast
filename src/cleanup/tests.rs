@@ -378,8 +378,12 @@ fn native_root_fixture() {
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
+    // Keep batch membership stable across discovery and freeze; child churn can leave
+    // an unreadable member provisionally classified as a service.
+    let fifo = std::ffi::CString::new(format!("{dir}/batch-wait")).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     let mut batch = Command::new("/bin/sh");
-    batch.args(["-c", "trap 'printf done > \"$BALLAST_CLEANUP_TEST_DIR/handled\"; exit 0' TERM; printf ready > \"$BALLAST_CLEANUP_TEST_DIR/batch-ready\"; while :; do sleep 0.05; done"]);
+    batch.args(["-c", "exec 3<> \"$BALLAST_CLEANUP_TEST_DIR/batch-wait\"; trap 'printf done > \"$BALLAST_CLEANUP_TEST_DIR/handled\"; exit 0' TERM; printf ready > \"$BALLAST_CLEANUP_TEST_DIR/batch-ready\"; read -r line <&3"]);
     let mut service = Command::new("/bin/sh");
     service.args(["-c", "\"$BALLAST_CLEANUP_TEST_EXE\" cleanup::tests::native_listener_fixture --exact --ignored --nocapture & wait"]);
     for command in [&mut batch, &mut service] {

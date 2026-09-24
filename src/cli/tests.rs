@@ -13,7 +13,7 @@ fn snapshot() -> Snapshot {
             "memory_footprint":true,"memory_psi":false,"kernel_pressure":true,"notifications":false,"atomic_signals":false},
         "processes":[],"changes":{"started":[],"exited":[],"exec_changed":[]},
         "pressure":{"page_size":4096,"total_memory_bytes":17179869184u64,"used_memory_bytes":12884901888u64,
-            "swap_used_bytes":1073741824,"kernel_pressure_level":4},
+            "swap_used_bytes":1073741824,"swap_total_bytes":4294967296u64,"kernel_pressure_level":4},
         "attribution":{"owners":[{"id":"owner","name":"Test fleet"}],
             "agents":[{"id":"agent-a","kind":"codex","owner_id":"owner","session_id":"session-a",
                 "state":"thinking","memory":{"bytes":2147483648u64,"complete":true,"growth_30s_bytes":0}}],
@@ -59,34 +59,43 @@ fn render(s: &Snapshot, width: u16, height: u16, scroll: &mut u16) -> String {
 #[test]
 fn layouts_wrap_without_losing_reasons_and_scroll_to_every_row() {
     let s = snapshot();
-    for width in [20, 40, 63, 80, 160] {
+    for width in [20, 40, 63, 80, 120, 160] {
         let screen = render(&s, width, 100, &mut 0);
         assert!(screen.contains("FROZEN"), "{width}: {screen}");
         assert!(screen.contains("HELD"));
         assert!(screen.contains("Guardian:"));
-        assert!(screen.contains("Admission:"));
         assert!(!screen.contains('\u{1b}'));
         let mut end = u16::MAX;
         let screen = render(&s, width, 12, &mut end);
         assert!(
-            screen.contains("ballast stop") || width < 40,
+            screen.contains("ballast stop") || width < 64,
             "{width}: {screen}"
         );
         assert!(end < u16::MAX);
     }
-    let wide = render(&s, 80, 36, &mut 0);
-    assert!(
-        wide.contains("    batch         ?    1.0 GiB~  synthetic build [FROZEN]"),
-        "{wide}"
-    );
-    assert!(wide.contains("0m30s"));
-    assert!(wide.contains("0m15s"));
+    for width in [80, 120, 160] {
+        let wide = render(&s, width, 36, &mut 0);
+        assert!(wide.contains("synthetic build"), "{wide}");
+        assert!(wide.contains("w-build"));
+        assert!(wide.contains("30s"));
+        assert!(wide.contains("15s"));
+        assert!(wide.contains("1 owner · 1 agent · 1 workload"));
+        assert_eq!(wide.matches("STATE").count(), 1);
+        assert!(!wide.contains("id:"));
+        if width >= 110 {
+            assert!(wide.contains("LABEL"));
+        }
+    }
     let mut observed = snapshot();
     observed.status.mode = crate::daemon::files::Mode::Observe;
-    let screen = render(&observed, 80, 40, &mut 0);
+    let screen = render(&observed, 120, 40, &mut 0);
     assert!(screen.contains("SIMULATED FREEZE"));
     assert!(screen.contains("no signal sent"));
-    assert!(screen.contains("[WOULD FREEZE]"));
+    observed.pressure.as_mut().unwrap().swap_total_bytes = Some(0);
+    assert!(render(&observed, 80, 40, &mut 0).contains("no swap"));
+    assert_eq!(age(6000, 0), "6s");
+    assert_eq!(age(65000, 0), "1m05s");
+    assert_eq!(age(7_380_000, 0), "2h03m");
     assert_eq!(
         clean("a\x1b[2J\n\t\u{202e}界e\u{301}"),
         "a [2J   界e\u{301}"
@@ -167,12 +176,24 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
     );
     ps["snapshot"].as_object_mut().unwrap().remove("held");
     ps["snapshot"].as_object_mut().unwrap().remove("guardian");
+    ps["snapshot"]["pressure"]
+        .as_object_mut()
+        .unwrap()
+        .remove("swap_total_bytes");
     let old: Response = serde_json::from_value(ps).unwrap();
     let Reply::Snapshot { snapshot } = old.reply else {
         panic!()
     };
     assert!(snapshot.held.is_empty());
     assert!(snapshot.guardian.is_none());
+    assert!(
+        snapshot
+            .pressure
+            .as_ref()
+            .unwrap()
+            .swap_total_bytes
+            .is_none()
+    );
 }
 
 #[test]
@@ -218,6 +239,14 @@ fn cpu_deltas_reset_on_gaps_missing_samples_and_pid_reuse() {
     s.status.sampled_at_ms += 6000;
     cpu.update(&s);
     assert!(cpu.values.is_empty());
+    s.status.sampled_at_ms += 1000;
+    s.boot_id = "another-boot".into();
+    s.processes[0].metrics.as_mut().unwrap().cpu_time_ns += 500_000_000;
+    cpu.update(&s);
+    assert!(
+        cpu.values.is_empty(),
+        "same numeric identity across boots must not produce a CPU delta"
+    );
 }
 
 #[test]

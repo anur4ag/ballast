@@ -161,7 +161,11 @@ fn number(value: Option<f64>) -> String {
 }
 fn age(now: u64, since: u64) -> String {
     let seconds = now.saturating_sub(since) / 1000;
-    format!("{}m{:02}s", seconds / 60, seconds % 60)
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, seconds % 3600 / 60),
+    }
 }
 // Process labels are untrusted terminal text, including ANSI escapes and bidi controls.
 fn clean(value: &str) -> String {
