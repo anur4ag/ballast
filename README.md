@@ -8,7 +8,7 @@ Install once, then keep using your agents as usual.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/top-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/top-light.svg">
-  <img alt="Ballast's live fleet: two agent workloads paused and one command waiting under critical memory pressure" src="docs/images/top-light.svg" width="1100">
+  <img alt="Ballast's live fleet: two agent workloads paused and one command waiting under memory pressure" src="docs/images/top-light.svg" width="1100">
 </picture>
 
 *A real `ballast top` capture of the synthetic demo fleet, with simulated memory pressure.*

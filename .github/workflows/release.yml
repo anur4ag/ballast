@@ -62,7 +62,7 @@ jobs:
       - name: Restore previous APT packages
         shell: bash
         run: |
-          previous=$(gh release list --exclude-drafts --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("v0.0.0-test.") | not)][0].tagName // empty')
+          previous=$(gh release list --exclude-drafts --limit 100 --json tagName --jq '[.[] | select(.tagName | contains("-test.") | not)][0].tagName // empty')
           if [ -n "$previous" ]; then
             gh release download "$previous" --pattern apt-repository.tar.gz --dir previous
           fi

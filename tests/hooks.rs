@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+// Unit tests are not a load test: parallel debug hooks can legitimately miss the production 200 ms deadline.
+static TIMELY_HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ---------------------------------------------------------------------
 // Fixtures: recorded Claude/Codex PreToolUse and SessionStart payloads,
@@ -132,22 +134,21 @@ fn fake_daemon(
 ) -> thread::JoinHandle<Value> {
     std::fs::create_dir_all(home.socket_path().parent().unwrap()).expect("create run dir");
     let listener = UnixListener::bind(home.socket_path()).expect("bind fake daemon socket");
-    listener.set_nonblocking(true).unwrap();
-    thread::spawn(move || {
-        let deadline = Instant::now() + CONNECT_TIMEOUT;
-        let stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(5))
-                }
-                Err(error) => panic!("hook did not connect within {CONNECT_TIMEOUT:?}: {error}"),
-            }
+    let (ready, started) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        use std::os::fd::AsRawFd;
+        let mut descriptor = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
         };
-        stream.set_nonblocking(false).unwrap();
+        ready.send(()).unwrap();
+        assert_eq!(
+            unsafe { libc::poll(&mut descriptor, 1, CONNECT_TIMEOUT.as_millis() as i32) },
+            1,
+            "hook did not connect within {CONNECT_TIMEOUT:?}"
+        );
+        let (stream, _) = listener.accept().expect("accept hook connection");
         stream.set_read_timeout(Some(CLI_TIMEOUT)).unwrap();
         stream.set_write_timeout(Some(CLI_TIMEOUT)).unwrap();
         let mut writer = stream.try_clone().expect("clone fake daemon stream");
@@ -158,7 +159,11 @@ fn fake_daemon(
             serde_json::from_str(line.trim_end()).expect("parse hook request as JSON");
         respond(&request, &mut writer);
         request
-    })
+    });
+    started
+        .recv_timeout(CONNECT_TIMEOUT)
+        .expect("fake daemon ready");
+    server
 }
 fn write_frame(stream: &mut UnixStream, value: &Value) {
     let mut text = value.to_string();
@@ -439,6 +444,7 @@ fn malformed_stdin_fails_open_even_if_stdin_never_closes() {
 
 #[test]
 fn hold_then_admit_waits_for_the_final_decision_then_stays_silent() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     let home = TempHome::new("holdadmit");
     let _daemon = fake_daemon(&home, |_request, stream| {
         write_frame(stream, &hold_frame());
@@ -462,6 +468,7 @@ fn hold_then_admit_waits_for_the_final_decision_then_stays_silent() {
 
 #[test]
 fn hold_past_its_own_deadline_fails_open() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     let home = TempHome::new("deadline");
     let _daemon = fake_daemon(&home, |_request, stream| {
         write_frame(stream, &hold_frame());
@@ -495,6 +502,7 @@ fn hold_past_its_own_deadline_fails_open() {
 
 #[test]
 fn deny_reports_the_reason_and_never_allows_or_rewrites_claude() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     let home = TempHome::new("denyclaude");
     let reason = "Ballast blocked this: pkill node would also kill 2 processes belonging to \
         another agent. Your own node processes are PIDs 100 and 101; kill those directly."
@@ -522,6 +530,7 @@ fn deny_reports_the_reason_and_never_allows_or_rewrites_claude() {
 
 #[test]
 fn deny_reports_the_reason_and_never_allows_or_rewrites_codex() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     let home = TempHome::new("denycodex");
     let reason = "Ballast blocked this: pkill node would also kill 2 processes belonging to \
         another agent. Your own node processes are PIDs 100 and 101; kill those directly."
@@ -622,6 +631,7 @@ fn healthy_daemon_admits_a_light_command_quickly() {
 
 #[test]
 fn post_tool_hints_are_additional_context_only_on_the_right_event() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     for agent in ["claude", "codex"] {
         for event in ["PostToolUse", "PreToolUse", "SessionStart"] {
             let home = TempHome::new("hint");
@@ -709,6 +719,7 @@ fn port_server_fixture() {
 
 #[test]
 fn two_agent_port_server_survives_cross_agent_hooks_and_reports_collision() {
+    let _timely_hook = TIMELY_HOOK.lock().unwrap();
     use ballast::daemon::files::{Config, Mode, Paths, RotatingLog};
     use ballast::daemon::ipc::{Client, Method, PendingRequest, Reply};
     use ballast::hooks::{Admission, HookRequest, HookState};

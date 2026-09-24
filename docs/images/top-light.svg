@@ -1,36 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1048" height="439" viewBox="0 0 1048 439">
 <title>Ballast live terminal capture</title>
-<rect width="100%" height="100%" rx="10" fill="#ffffff"/>
+<rect width="1048" height="439" rx="10" fill="#ffffff"/>
 <g font-family="Menlo,Consolas,monospace" font-size="14" xml:space="preserve">
-<text x="20" y="36" fill="#262626" font-weight="700" textLength="75.6" lengthAdjust="spacingAndGlyphs">BALLAST  </text>
+<text x="20" y="36" fill="#262626" font-weight="700" textLength="75.6" lengthAdjust="spacingAndGlyphs">BALLAST&#160;&#160;</text>
 <text x="95.6" y="36" fill="#976f00" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">ELEVATED</text>
-<text x="162.8" y="36" fill="#262626" font-weight="400" textLength="252" lengthAdjust="spacingAndGlyphs"> · Enforce · 2 frozen · 1 held</text>
-<text x="20" y="57" fill="#262626" font-weight="400" textLength="50.4" lengthAdjust="spacingAndGlyphs">MEM  [</text>
+<text x="162.8" y="36" fill="#262626" font-weight="400" textLength="252" lengthAdjust="spacingAndGlyphs">&#160;·&#160;Enforce&#160;·&#160;2&#160;frozen&#160;·&#160;1&#160;held</text>
+<text x="20" y="57" fill="#262626" font-weight="400" textLength="50.4" lengthAdjust="spacingAndGlyphs">MEM&#160;&#160;[</text>
 <text x="70.4" y="57" fill="#976f00" font-weight="700" textLength="126" lengthAdjust="spacingAndGlyphs">|||||||||||||||</text>
-<text x="196.4" y="57" fill="#262626" font-weight="400" textLength="378" lengthAdjust="spacingAndGlyphs">···············] 8.0 GiB / 16.0 GiB    SWAP [</text>
+<text x="196.4" y="57" fill="#262626" font-weight="400" textLength="378" lengthAdjust="spacingAndGlyphs">···············]&#160;8.0&#160;GiB&#160;/&#160;16.0&#160;GiB&#160;&#160;&#160;&#160;SWAP&#160;[</text>
 <text x="574.4" y="57" fill="#a35aa5" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">||||||||</text>
-<text x="641.6" y="57" fill="#262626" font-weight="400" textLength="352.8" lengthAdjust="spacingAndGlyphs">·······················] 1.0 GiB / 4.0 GiB</text>
-<text x="20" y="78" fill="#262626" font-weight="400" textLength="394.8" lengthAdjust="spacingAndGlyphs">kernel warn · pageout ? MiB/s · swapout ? MiB/s</text>
-<text x="20" y="99" fill="#262626" font-weight="400" textLength="487.2" lengthAdjust="spacingAndGlyphs">Guardian: Heavy commands may wait; running work continues.</text>
-<text x="20" y="120" fill="#262626" font-weight="700" textLength="134.4" lengthAdjust="spacingAndGlyphs">PAUSED &amp; WAITING</text>
-<text x="20" y="141" fill="#3279ba" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">FROZEN  </text>
-<text x="87.2" y="141" fill="#262626" font-weight="400" textLength="487.2" lengthAdjust="spacingAndGlyphs">claude/agent-b  synthetic workload 3  11s  memory pressure</text>
-<text x="20" y="162" fill="#3279ba" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">FROZEN  </text>
-<text x="87.2" y="162" fill="#262626" font-weight="400" textLength="470.4" lengthAdjust="spacingAndGlyphs">codex/agent-a  synthetic workload 2  6s  memory pressure</text>
-<text x="20" y="183" fill="#a35aa5" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">HELD    </text>
-<text x="87.2" y="183" fill="#262626" font-weight="400" textLength="520.8" lengthAdjust="spacingAndGlyphs">claude/agent-b  [synthetic held command]  10s  memory pressure</text>
-<text x="20" y="204" fill="#262626" font-weight="700" textLength="327.6" lengthAdjust="spacingAndGlyphs">FLEET  1 owner · 2 agents · 3 workloads</text>
-<text x="20" y="225" fill="#262626" font-weight="700" textLength="907.2" lengthAdjust="spacingAndGlyphs">STATE      CLASS      CPU%         MEM     AGE LABEL                                                      ID</text>
-<text x="20" y="246" fill="#262626" font-weight="700" textLength="596.4" lengthAdjust="spacingAndGlyphs">                                               ▾ TUI verification fleet</text>
-<text x="20" y="267" fill="#262626" font-weight="700" textLength="949.2" lengthAdjust="spacingAndGlyphs">thinking   agent       0.0        5.0G       - ├ codex                                                    agent-a</text>
-<text x="20" y="288" fill="#262626" font-weight="400" textLength="1008" lengthAdjust="spacingAndGlyphs">running    batch       0.0        3.0G     11s │ ├ synthetic workload 1                                   fixture-work-1</text>
-<text x="20" y="309" fill="#3279ba" font-weight="700" textLength="84" lengthAdjust="spacingAndGlyphs">FROZEN    </text>
-<text x="104" y="309" fill="#262626" font-weight="400" textLength="924" lengthAdjust="spacingAndGlyphs"> batch       0.0        2.0G     11s │ └ synthetic workload 2                                   fixture-work-2</text>
-<text x="20" y="330" fill="#262626" font-weight="700" textLength="949.2" lengthAdjust="spacingAndGlyphs">idle       agent       0.0        1.0G       - └ claude                                                   agent-b</text>
-<text x="20" y="351" fill="#3279ba" font-weight="700" textLength="84" lengthAdjust="spacingAndGlyphs">FROZEN    </text>
-<text x="104" y="351" fill="#262626" font-weight="400" textLength="924" lengthAdjust="spacingAndGlyphs"> batch       0.0        1.0G     11s   └ synthetic workload 3                                   fixture-work-3</text>
+<text x="641.6" y="57" fill="#262626" font-weight="400" textLength="352.8" lengthAdjust="spacingAndGlyphs">·······················]&#160;1.0&#160;GiB&#160;/&#160;4.0&#160;GiB</text>
+<text x="20" y="78" fill="#262626" font-weight="400" textLength="394.8" lengthAdjust="spacingAndGlyphs">kernel&#160;warn&#160;·&#160;pageout&#160;?&#160;MiB/s&#160;·&#160;swapout&#160;?&#160;MiB/s</text>
+<text x="20" y="99" fill="#262626" font-weight="400" textLength="487.2" lengthAdjust="spacingAndGlyphs">Guardian:&#160;Heavy&#160;commands&#160;may&#160;wait;&#160;running&#160;work&#160;continues.</text>
+<text x="20" y="120" fill="#262626" font-weight="700" textLength="134.4" lengthAdjust="spacingAndGlyphs">PAUSED&#160;&amp;&#160;WAITING</text>
+<text x="20" y="141" fill="#3279ba" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">FROZEN&#160;&#160;</text>
+<text x="87.2" y="141" fill="#262626" font-weight="400" textLength="487.2" lengthAdjust="spacingAndGlyphs">claude/agent-b&#160;&#160;synthetic&#160;workload&#160;3&#160;&#160;11s&#160;&#160;memory&#160;pressure</text>
+<text x="20" y="162" fill="#3279ba" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">FROZEN&#160;&#160;</text>
+<text x="87.2" y="162" fill="#262626" font-weight="400" textLength="470.4" lengthAdjust="spacingAndGlyphs">codex/agent-a&#160;&#160;synthetic&#160;workload&#160;2&#160;&#160;6s&#160;&#160;memory&#160;pressure</text>
+<text x="20" y="183" fill="#a35aa5" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">HELD&#160;&#160;&#160;&#160;</text>
+<text x="87.2" y="183" fill="#262626" font-weight="400" textLength="520.8" lengthAdjust="spacingAndGlyphs">claude/agent-b&#160;&#160;[synthetic&#160;held&#160;command]&#160;&#160;10s&#160;&#160;memory&#160;pressure</text>
+<text x="20" y="204" fill="#262626" font-weight="700" textLength="327.6" lengthAdjust="spacingAndGlyphs">FLEET&#160;&#160;1&#160;owner&#160;·&#160;2&#160;agents&#160;·&#160;3&#160;workloads</text>
+<text x="20" y="225" fill="#262626" font-weight="700" textLength="907.2" lengthAdjust="spacingAndGlyphs">STATE&#160;&#160;&#160;&#160;&#160;&#160;CLASS&#160;&#160;&#160;&#160;&#160;&#160;CPU%&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;MEM&#160;&#160;&#160;&#160;&#160;AGE&#160;LABEL&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;ID</text>
+<text x="20" y="246" fill="#262626" font-weight="700" textLength="596.4" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;▾&#160;TUI&#160;verification&#160;fleet</text>
+<text x="20" y="267" fill="#262626" font-weight="700" textLength="949.2" lengthAdjust="spacingAndGlyphs">thinking&#160;&#160;&#160;agent&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;5.0G&#160;&#160;&#160;&#160;&#160;&#160;&#160;-&#160;├&#160;codex&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;agent-a</text>
+<text x="20" y="288" fill="#262626" font-weight="400" textLength="1008" lengthAdjust="spacingAndGlyphs">running&#160;&#160;&#160;&#160;batch&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;3.0G&#160;&#160;&#160;&#160;&#160;11s&#160;│&#160;├&#160;synthetic&#160;workload&#160;1&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;fixture-work-1</text>
+<text x="20" y="309" fill="#3279ba" font-weight="700" textLength="84" lengthAdjust="spacingAndGlyphs">FROZEN&#160;&#160;&#160;&#160;</text>
+<text x="104" y="309" fill="#262626" font-weight="400" textLength="924" lengthAdjust="spacingAndGlyphs">&#160;batch&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;2.0G&#160;&#160;&#160;&#160;&#160;11s&#160;│&#160;└&#160;synthetic&#160;workload&#160;2&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;fixture-work-2</text>
+<text x="20" y="330" fill="#262626" font-weight="700" textLength="949.2" lengthAdjust="spacingAndGlyphs">idle&#160;&#160;&#160;&#160;&#160;&#160;&#160;agent&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;1.0G&#160;&#160;&#160;&#160;&#160;&#160;&#160;-&#160;└&#160;claude&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;agent-b</text>
+<text x="20" y="351" fill="#3279ba" font-weight="700" textLength="84" lengthAdjust="spacingAndGlyphs">FROZEN&#160;&#160;&#160;&#160;</text>
+<text x="104" y="351" fill="#262626" font-weight="400" textLength="924" lengthAdjust="spacingAndGlyphs">&#160;batch&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;1.0G&#160;&#160;&#160;&#160;&#160;11s&#160;&#160;&#160;└&#160;synthetic&#160;workload&#160;3&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;fixture-work-3</text>
 <text x="20" y="372" fill="#262626" font-weight="400" textLength="1008" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
-<text x="20" y="393" fill="#262626" font-weight="400" textLength="722.4" lengthAdjust="spacingAndGlyphs">q quit  j/k scroll  PgUp/PgDn  Home/End · CPU: one core = 100% · ? unknown · ~ partial</text>
-<text x="20" y="414" fill="#262626" font-weight="400" textLength="520.8" lengthAdjust="spacingAndGlyphs">ballast resume &lt;id&gt;|--all · ballast stop &lt;id&gt; · rows 1-12 / 12</text>
+<text x="20" y="393" fill="#262626" font-weight="400" textLength="722.4" lengthAdjust="spacingAndGlyphs">q&#160;quit&#160;&#160;j/k&#160;scroll&#160;&#160;PgUp/PgDn&#160;&#160;Home/End&#160;·&#160;CPU:&#160;one&#160;core&#160;=&#160;100%&#160;·&#160;?&#160;unknown&#160;·&#160;~&#160;partial</text>
+<text x="20" y="414" fill="#262626" font-weight="400" textLength="520.8" lengthAdjust="spacingAndGlyphs">ballast&#160;resume&#160;&lt;id&gt;|--all&#160;·&#160;ballast&#160;stop&#160;&lt;id&gt;&#160;·&#160;rows&#160;1-12&#160;/&#160;12</text>
 </g>
 </svg>
