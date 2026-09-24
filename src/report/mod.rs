@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 mod tests;
@@ -251,6 +252,13 @@ fn local_time(at: u64) -> libc::tm {
     let seconds = (at / 1000) as libc::time_t;
     let mut tm = unsafe { std::mem::zeroed() };
     unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            unsafe extern "C" {
+                fn tzset();
+            }
+            tzset();
+        }
         libc::localtime_r(&seconds, &mut tm);
     }
     tm
@@ -340,31 +348,56 @@ pub(crate) enum Message {
         frozen: Vec<(String, u64, bool)>,
     },
 }
+#[derive(Default)]
+struct Pending {
+    latest: Option<Store>,
+    decision: bool,
+    stopping: bool,
+}
+type Mailbox = Arc<(Mutex<Pending>, Condvar)>;
+#[derive(Clone)]
+pub(crate) struct Recorder {
+    engine: Arc<Mutex<Engine>>,
+    mailbox: Mailbox,
+}
+impl Recorder {
+    pub(crate) fn record(&self, message: Message) -> Summary {
+        let decision = matches!(&message, Message::Decision { .. });
+        let mut engine = self.engine.lock().unwrap();
+        let at = engine.apply(message);
+        engine.store.prune(at);
+        let summary = engine.store.summary(at);
+        let mut pending = self.mailbox.0.lock().unwrap();
+        pending.latest = Some(engine.store.clone());
+        pending.decision |= decision;
+        self.mailbox.1.notify_one();
+        summary
+    }
+}
 pub struct Worker {
-    pub(crate) send: mpsc::Sender<Message>,
-    today: Arc<RwLock<Summary>>,
+    pub(crate) recorder: Recorder,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
     pub fn start(paths: Paths) -> io::Result<Self> {
-        let store = read_or_empty(&paths);
-        let today = Arc::new(RwLock::new(store.summary(crate::daemon::unix_ms())));
-        let published = Arc::clone(&today);
-        // ponytail: one consumer at <=4 samples/s; coalesce samples if slow disks cause backlog.
-        let (send, receive) = mpsc::channel();
-        std::thread::Builder::new()
+        Self::with_writer(read_or_empty(&paths), move |store| write(&paths, store))
+    }
+    fn with_writer(
+        store: Store,
+        persist: impl FnMut(&Store) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Self> {
+        let mailbox = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
+        let recorder = Recorder {
+            engine: Arc::new(Mutex::new(Engine::new(store))),
+            mailbox: Arc::clone(&mailbox),
+        };
+        let thread = std::thread::Builder::new()
             .name("stats".into())
-            .spawn(move || {
-                let mut engine = Engine::new(store);
-                for message in receive {
-                    let at = engine.apply(message);
-                    engine.store.prune(at);
-                    if let Err(error) = write(&paths, &engine.store) {
-                        eprintln!("stats write failed: {error}");
-                    }
-                    *published.write().unwrap() = engine.store.summary(at);
-                }
-            })?;
-        Ok(Self { send, today })
+            .spawn(move || run_worker(mailbox, persist))?;
+        Ok(Self {
+            recorder,
+            thread: Some(thread),
+        })
     }
     pub fn sample(&self, s: &Snapshot) -> Summary {
         let frozen = s
@@ -383,14 +416,63 @@ impl Worker {
                 )
             })
             .collect();
-        let _ = self.send.send(Message::Sample {
+        self.recorder.record(Message::Sample {
             at: s.status.sampled_at_ms,
             observe: matches!(s.status.mode, Mode::Observe),
             level: (!s.status.sample_discarded && s.pressure.is_some())
                 .then(|| level(s.status.pressure_level)),
             frozen,
-        });
-        self.today.read().unwrap().clone()
+        })
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.recorder.mailbox.0.lock().unwrap().stopping = true;
+        self.recorder.mailbox.1.notify_one();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                eprintln!("stats worker failed during shutdown");
+            }
+        }
+    }
+}
+fn run_worker(mailbox: Mailbox, mut persist: impl FnMut(&Store) -> io::Result<()>) {
+    let mut last_write = Instant::now();
+    let interval = Duration::from_secs(30);
+    let mut retry = None;
+    loop {
+        let mut pending = mailbox.0.lock().unwrap();
+        loop {
+            let dirty = pending.latest.is_some() || retry.is_some();
+            if pending.stopping || (dirty && (pending.decision || last_write.elapsed() >= interval))
+            {
+                break;
+            }
+            let wait = if dirty {
+                interval.saturating_sub(last_write.elapsed())
+            } else {
+                interval
+            };
+            pending = mailbox.1.wait_timeout(pending, wait).unwrap().0;
+        }
+        let stopping = pending.stopping;
+        let latest = pending.latest.take().or_else(|| retry.take());
+        pending.decision = false;
+        drop(pending);
+        // No producer lock is held during serialization or disk I/O.
+        if let Some(store) = latest {
+            match persist(&store) {
+                Ok(()) => retry = None,
+                Err(error) => {
+                    eprintln!("stats write failed: {error}");
+                    retry = Some(store);
+                }
+            }
+            last_write = Instant::now();
+        }
+        if stopping {
+            break;
+        }
     }
 }
 fn level(value: crate::guardian::Level) -> String {

@@ -159,7 +159,7 @@ pub struct RotatingLog {
     size: u64,
     max_bytes: u64,
     rotations: usize,
-    stats: Option<std::sync::mpsc::Sender<crate::report::Message>>,
+    stats: Option<crate::report::Recorder>,
 }
 impl RotatingLog {
     pub fn open(path: PathBuf, config: &Config) -> io::Result<Self> {
@@ -208,7 +208,7 @@ impl RotatingLog {
         PathBuf::from(path)
     }
     pub fn report_to(&mut self, worker: &crate::report::Worker) {
-        self.stats = Some(worker.send.clone());
+        self.stats = Some(worker.recorder.clone());
     }
     pub fn decision(&mut self, event: &str, details: serde_json::Value) -> io::Result<()> {
         let at = super::unix_ms();
@@ -227,7 +227,7 @@ impl RotatingLog {
                 | "clean_reclaimed"
         ) {
             if let Some(stats) = &self.stats {
-                let _ = stats.send(crate::report::Message::Decision {
+                stats.record(crate::report::Message::Decision {
                     at,
                     event: event.into(),
                     details,

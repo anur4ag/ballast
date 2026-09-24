@@ -125,9 +125,13 @@ Missing or corrupt data produces an empty report; corruption also prints a diagn
 The read-only command does not recover, signal, or modify state.
 
 The daemon keeps the latest 90 local days independently of rotated decision logs.
-A worker consumes decision evidence and sampling intervals, atomically replaces a private `stats.json`, and syncs the file and containing directory.
-Writes are outside the sampling thread; the report and top summary can lag a tick while a write is pending.
-An abrupt exit can lose queued, not-yet-persisted updates.
+Decision evidence and sampling intervals update cumulative aggregates on the tick thread.
+A worker atomically replaces a private `stats.json` and syncs the file and containing directory.
+A single-slot mailbox retains the latest cumulative aggregate; decisions trigger a write immediately, while sample-only changes persist at most every 30 seconds.
+Clean shutdown flushes pending changes and joins the worker.
+The top summary updates with each sample; reports read persisted data and sample-only totals can lag by 30 seconds.
+A prolonged storage stall replaces the pending aggregate with its newer cumulative value; producers never wait for disk I/O and memory does not grow with a backlog.
+An abrupt exit can lose not-yet-persisted updates.
 Only aggregates are persisted, with no process identities, session IDs, commands, paths, arguments or environment contents.
 
 Enforce outcomes and observe proposals are separate.

@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::sync::mpsc;
 
 fn event(e: &mut Engine, at: u64, name: &str, details: Value) {
     e.apply(Message::Decision {
@@ -286,16 +287,16 @@ fn a_missing_frozen_workload_is_an_unknown_memory_sample() {
         "attribution":{"owners":[],"agents":[],"workloads":[],"processes":[]},
         "frozen":[{"workload_id":"missing","root":{"pid":1,"start_time":1},"processes":[],"frozen_at_ms":30000}]
     })).unwrap();
-    let (send, receive) = mpsc::channel();
-    let worker = Worker {
-        send,
-        today: Arc::new(RwLock::new(Summary::default())),
-    };
+    let worker = Worker::with_writer(Store::default(), |_| Ok(())).unwrap();
+    worker.recorder.record(Message::Decision { at: 30000, event: "freeze".into(), details: json!({"mode":"enforce","level":"critical","decision":{"workload_id":"missing","agent_kind":"claude"}}) });
     worker.sample(&snapshot);
-    let Message::Sample { frozen, .. } = receive.recv().unwrap() else {
-        panic!("expected sample");
-    };
-    assert_eq!(frozen, [("missing".into(), 0, false)]);
+    let engine = worker.recorder.engine.lock().unwrap();
+    let totals = engine.store.report(1, 60000).unwrap().totals.enforce;
+    let freeze = &totals.freezes_by_agent_kind["claude"];
+    assert_eq!(
+        (freeze.peak_memory_bytes, freeze.incomplete_memory_samples),
+        (0, 1)
+    );
 }
 
 #[test]
@@ -321,4 +322,148 @@ fn a_late_confirmed_exit_keeps_its_last_observed_memory() {
         (totals.reclaimed_processes, totals.reclaimed_memory_bytes),
         (1, 512)
     );
+}
+
+#[test]
+fn idle_samples_coalesce_and_clean_shutdown_flushes_without_losing_totals() {
+    let paths = Paths {
+        base: std::env::temp_dir().join(format!("ballast-report-idle-{}", std::process::id())),
+    };
+    paths.prepare().unwrap();
+    let worker_paths = paths.clone();
+    let (written, writes) = mpsc::channel();
+    let worker = Worker::with_writer(Store::default(), move |store| {
+        write(&worker_paths, store)?;
+        written.send(()).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let at = crate::daemon::unix_ms() / 3_600_000 * 3_600_000;
+    worker.recorder.record(Message::Decision {
+        at,
+        event: "hold".into(),
+        details: json!({"mode":"enforce"}),
+    });
+    // A decision is durable immediately, without waiting for another sample.
+    writes.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        read(&paths)
+            .unwrap()
+            .report(1, at)
+            .unwrap()
+            .totals
+            .enforce
+            .holds,
+        1
+    );
+    for tick in 0..=60 {
+        worker.recorder.record(Message::Sample {
+            at: at + tick * 1000,
+            observe: false,
+            level: Some("normal".into()),
+            frozen: vec![],
+        });
+    }
+    // Dropping the owner flushes even if a decision producer still holds a recorder.
+    let producer = worker.recorder.clone();
+    drop(worker);
+    assert_eq!(
+        writes.try_iter().count(),
+        1,
+        "idle samples must share one final write"
+    );
+    let totals = read(&paths)
+        .unwrap()
+        .report(1, at + 60_000)
+        .unwrap()
+        .totals
+        .enforce;
+    assert_eq!((totals.observed_ms, totals.holds), (60_000, 1));
+    drop(producer);
+    fs::remove_dir_all(paths.base).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn day_keys_follow_timezone_changes() {
+    if std::env::var_os("BALLAST_REPORT_TZ_CHANGE_TEST").is_some() {
+        // This subprocess runs only this test; no other thread accesses the environment.
+        let at = 1_781_499_600_000; // 2026-06-15 05:00 UTC.
+        assert_eq!(day_offset(at, 0), "2026-06-14");
+        unsafe {
+            std::env::set_var("TZ", "Asia/Tokyo");
+        }
+        assert_eq!(day_offset(at, 0), "2026-06-15");
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "report::tests::day_keys_follow_timezone_changes"])
+        .env("TZ", "Pacific/Honolulu")
+        .env("BALLAST_REPORT_TZ_CHANGE_TEST", "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn stalled_writer_does_not_block_ticks_or_lose_cumulative_updates() {
+    let (started, writing) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let (saved, stores) = mpsc::channel();
+    let mut first = true;
+    let worker = Worker::with_writer(Store::default(), move |store| {
+        if first {
+            first = false;
+            started.send(()).unwrap();
+            resume.recv().unwrap();
+        }
+        saved.send(store.clone()).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let at = crate::daemon::unix_ms() / 3_600_000 * 3_600_000;
+    worker.recorder.record(Message::Decision {
+        at,
+        event: "hold".into(),
+        details: json!({"mode":"enforce"}),
+    });
+    writing.recv_timeout(Duration::from_secs(5)).unwrap();
+    let recorder = worker.recorder.clone();
+    let (done, finished) = mpsc::channel();
+    let ticks = std::thread::spawn(move || {
+        for tick in 0..=1000 {
+            recorder.record(Message::Sample {
+                at: at + tick * 1000,
+                observe: false,
+                level: Some("normal".into()),
+                frozen: vec![],
+            });
+            recorder.record(Message::Decision {
+                at: at + tick * 1000,
+                event: "hold".into(),
+                details: json!({"mode":"enforce"}),
+            });
+        }
+        done.send(()).unwrap();
+    });
+    let progressed = finished.recv_timeout(Duration::from_secs(5));
+    // Always release the writer before asserting, so failure cannot strand a thread.
+    release.send(()).unwrap();
+    ticks.join().unwrap();
+    drop(worker);
+    assert!(progressed.is_ok(), "ticks blocked on stalled storage");
+    let stores: Vec<_> = stores.try_iter().collect();
+    assert_eq!(
+        stores.len(),
+        2,
+        "only the newest cumulative value is pending"
+    );
+    let totals = stores
+        .last()
+        .unwrap()
+        .report(1, at + 1_000_000)
+        .unwrap()
+        .totals
+        .enforce;
+    assert_eq!((totals.observed_ms, totals.holds), (1_000_000, 1002));
 }
