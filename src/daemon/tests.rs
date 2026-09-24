@@ -3,9 +3,18 @@
 //! itself (`std::process::exit(1)`) doesn't take down the test harness.
 
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+// A concurrent fork can retain another test's flock until exec closes its inherited fd.
+pub(super) static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+fn with_spawn_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -18,7 +27,7 @@ impl Drop for ChildGuard {
 #[test]
 fn watchdog_exits_the_process_after_a_stalled_heartbeat() {
     let exe = std::env::current_exe().expect("current_exe for watchdog fixture re-exec");
-    let mut guard = ChildGuard(
+    let mut guard = ChildGuard(with_spawn_lock(|| {
         Command::new(exe)
             .args([
                 "daemon::tests::watchdog_stalled_heartbeat_fixture",
@@ -29,8 +38,8 @@ fn watchdog_exits_the_process_after_a_stalled_heartbeat() {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn watchdog fixture"),
-    );
+            .expect("spawn watchdog fixture")
+    }));
 
     let started = Instant::now();
     let deadline = started + Duration::from_secs(40);
@@ -145,7 +154,7 @@ fn run_benchmark_pass(label: &str, watched: &[crate::platform::ProcessIdentity])
         "watched100"
     });
     let exe = std::env::current_exe().expect("current_exe for benchmark fixture re-exec");
-    let daemon = ChildGuard(
+    let daemon = ChildGuard(with_spawn_lock(|| {
         Command::new(exe)
             .args([
                 "daemon::tests::daemon_benchmark_fixture",
@@ -161,8 +170,8 @@ fn run_benchmark_pass(label: &str, watched: &[crate::platform::ProcessIdentity])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn daemon benchmark fixture"),
-    );
+            .expect("spawn daemon benchmark fixture")
+    }));
 
     let paths = super::files::Paths {
         base: home.0.clone(),

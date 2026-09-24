@@ -3,6 +3,7 @@ pub mod ipc;
 #[cfg(test)]
 mod tests;
 
+use crate::attribution::{AttributionSnapshot, Attributor};
 use crate::platform::{
     Capabilities, NativePlatform, Platform, PressureInputs, Process, ProcessIdentity,
 };
@@ -40,6 +41,7 @@ pub struct Snapshot {
     pub processes: Vec<Process>,
     pub changes: ProcessChanges,
     pub pressure: Option<PressureInputs>,
+    pub attribution: AttributionSnapshot,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ProcessChanges {
@@ -116,8 +118,8 @@ pub fn run(paths: Paths) -> io::Result<()> {
 
 fn run_with_targets(
     paths: Paths,
-    watched: HashSet<ProcessIdentity>,
-    metric_targets: HashSet<ProcessIdentity>,
+    extra_watched: HashSet<ProcessIdentity>,
+    extra_metrics: HashSet<ProcessIdentity>,
 ) -> io::Result<()> {
     if unsafe { libc::geteuid() } == 0 {
         return Err(io::Error::new(
@@ -162,6 +164,7 @@ fn run_with_targets(
         processes: Vec::new(),
         changes: ProcessChanges::default(),
         pressure: None,
+        attribution: AttributionSnapshot::default(),
     })));
     let (send, requests) = mpsc::sync_channel(128);
     let mut socket_server = Some((server, send));
@@ -169,6 +172,7 @@ fn run_with_targets(
     start_watchdog(Arc::clone(&heartbeat))?;
     tick_qos()?;
     let mut observer = Observer::default();
+    let mut attributor = Attributor::new(config.markers.clone(), config.shells.clone());
     let mut next_tick = Instant::now();
     loop {
         if Instant::now() >= next_tick {
@@ -180,6 +184,9 @@ fn run_with_targets(
             status.tick_interval_ms = observer.interval().as_millis() as u64;
             status.sample_discarded = discard;
             status.last_error = None;
+            let watched = attributor.watched(&extra_watched);
+            let mut metric_targets = attributor.metric_targets();
+            metric_targets.extend(&extra_metrics);
             let observed = platform.list_processes(&watched, &metric_targets);
             let pressure = platform.pressure();
             let snapshot = match (observed, pressure) {
@@ -209,7 +216,14 @@ fn run_with_targets(
                     eprintln!("daemon log failed: {write_error}");
                 }
             }
-            let next = if let Some((processes, changes, pressure)) = snapshot {
+            let next = if let Some((mut processes, changes, pressure)) = snapshot {
+                let attribution = attributor.update(
+                    &platform,
+                    &mut processes,
+                    started,
+                    status.sampled_at_ms,
+                    status.sample_discarded,
+                );
                 Snapshot {
                     status: status.clone(),
                     boot_id: boot_id.clone(),
@@ -217,8 +231,10 @@ fn run_with_targets(
                     processes,
                     changes,
                     pressure,
+                    attribution,
                 }
             } else {
+                attributor.reset_growth();
                 // A failed scan must not manufacture exits or reset attribution.
                 let previous = published.read().unwrap();
                 Snapshot {
@@ -226,6 +242,7 @@ fn run_with_targets(
                     boot_id: boot_id.clone(),
                     capabilities,
                     processes: previous.processes.clone(),
+                    attribution: previous.attribution.clone(),
                     changes: ProcessChanges::default(),
                     pressure: None,
                 }

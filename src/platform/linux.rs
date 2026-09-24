@@ -13,6 +13,7 @@ pub struct NativePlatform {
     page_size: u64,
     ticks: u64,
     live: HashSet<ProcessIdentity>,
+    enumerated: Option<HashSet<i32>>,
     stat_buffer: Vec<u8>,
     path_buffer: String,
     atomic_signals: bool,
@@ -35,6 +36,7 @@ impl NativePlatform {
             page_size: page_size as u64,
             ticks: ticks as u64,
             live: HashSet::with_capacity(2048),
+            enumerated: None,
             stat_buffer: Vec::with_capacity(1024),
             path_buffer: String::with_capacity(64),
             atomic_signals,
@@ -55,11 +57,20 @@ impl NativePlatform {
         path.clear();
         write!(path, "/proc/{pid}/stat").ok()?;
         let mut file = fs::File::open(&*path).ok()?;
-        contents.clear();
-        // Avoid File's size/position probes: procfs reports size zero anyway.
-        (&mut file).take(u64::MAX).read_to_end(contents).ok()?;
+        // procfs emits stat in one short read; avoid a second syscall just to discover EOF.
+        contents.resize(4096, 0);
+        let length = loop {
+            match file.read(contents) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result.ok()?,
+            }
+        };
+        contents.truncate(length);
+        if length == 4096 || contents.last() != Some(&b'\n') {
+            return None;
+        }
         let suffix = contents.get(contents.iter().rposition(|&byte| byte == b')')? + 2..)?;
-        let mut fields = [""; 20];
+        let mut fields = [""; 22];
         for (slot, value) in fields
             .iter_mut()
             .zip(std::str::from_utf8(suffix).ok()?.split_whitespace())
@@ -84,15 +95,7 @@ impl NativePlatform {
             Some((_, cached)) => cached.uid,
             None => file.metadata().ok()?.uid(),
         };
-        let resident_pages = want_metrics(identity)
-            .then(|| {
-                path.clear();
-                write!(path, "/proc/{pid}/statm").ok()?;
-                fs::read_to_string(&*path)
-                    .ok()
-                    .and_then(|data| data.split_whitespace().nth(1)?.parse::<u64>().ok())
-            })
-            .flatten();
+        let resident_pages = want_metrics(identity).then(|| number(21)).flatten();
         Some(Process {
             identity,
             ppid: number(1)? as i32,
@@ -151,10 +154,13 @@ impl Platform for NativePlatform {
         let mut path = std::mem::take(&mut self.path_buffer);
         self.live.clear();
         let now = Instant::now();
-        for entry in entries.flatten() {
+        let mut enumerated = HashSet::new();
+        for entry in entries {
+            let entry = entry?;
             let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
                 continue;
             };
+            enumerated.insert(pid);
             if let Some(process) = self.cache.get(pid, now, &selected_pids) {
                 self.live.insert(process.identity);
                 processes.push(process);
@@ -214,7 +220,31 @@ impl Platform for NativePlatform {
         self.stat_buffer = buffer;
         self.path_buffer = path;
         self.cache.retain(&self.live);
+        self.enumerated = Some(enumerated);
         Ok(processes)
+    }
+
+    fn pid_is_present(&self, pid: i32) -> Option<bool> {
+        self.enumerated.as_ref().map(|pids| pids.contains(&pid))
+    }
+
+    fn process_liveness(&self, id: ProcessIdentity) -> ProcessLiveness {
+        if self.live.contains(&id) {
+            ProcessLiveness::Alive
+        } else if self
+            .enumerated
+            .as_ref()
+            .is_some_and(|pids| !pids.contains(&id.pid))
+            || self
+                .cache
+                .0
+                .get(&id.pid)
+                .is_some_and(|(_, p)| p.identity != id)
+        {
+            ProcessLiveness::Gone
+        } else {
+            ProcessLiveness::Unknown
+        }
     }
 
     fn read_environment(&self, id: ProcessIdentity) -> Option<Environment> {
@@ -235,6 +265,26 @@ impl Platform for NativePlatform {
             |_| true,
         )?;
         (process.identity == id).then_some(process.metrics?)
+    }
+
+    fn process_age(&self, id: ProcessIdentity) -> Option<Duration> {
+        let uptime: f64 = fs::read_to_string("/proc/uptime")
+            .ok()?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        let age =
+            Duration::try_from_secs_f64(uptime - id.start_time as f64 / self.ticks as f64).ok()?;
+        self.matches(id).then_some(age)
+    }
+
+    fn process_cwd(&self, id: ProcessIdentity) -> Option<std::path::PathBuf> {
+        if !self.matches(id) {
+            return None;
+        }
+        let cwd = fs::read_link(format!("/proc/{}/cwd", id.pid)).ok()?;
+        self.matches(id).then_some(cwd)
     }
 
     fn pressure(&self) -> io::Result<PressureInputs> {
@@ -293,44 +343,38 @@ impl Platform for NativePlatform {
     }
 
     fn listening_ports(&self, id: ProcessIdentity) -> Option<Vec<u16>> {
-        if !self.matches(id) {
-            return None;
-        }
-        let fds = fs::read_dir(format!("/proc/{}/fd", id.pid)).ok()?;
-        let mut inodes = HashSet::new();
-        for fd in fds.flatten() {
-            match fs::read_link(fd.path()) {
-                Ok(link) => {
-                    let link = link.to_str()?;
-                    if let Some(inode) = link
-                        .strip_prefix("socket:[")
-                        .and_then(|s| s.strip_suffix(']'))
-                    {
-                        inodes.insert(inode.to_owned());
+        self.listening_ports_batch(&[id]).remove(&id).flatten()
+    }
+
+    fn listening_ports_batch(
+        &self,
+        processes: &[ProcessIdentity],
+    ) -> HashMap<ProcessIdentity, Option<Vec<u16>>> {
+        let mut tables = HashMap::new();
+        processes
+            .iter()
+            .map(|&id| {
+                let ports = (|| {
+                    if !self.matches(id) {
+                        return None;
                     }
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
-            }
-        }
-        let mut ports = Vec::new();
-        for table in ["tcp", "tcp6"] {
-            let data = match fs::read_to_string(format!("/proc/{}/net/{table}", id.pid)) {
-                Ok(data) => data,
-                Err(e) if table == "tcp6" && e.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
-            };
-            for line in data.lines().skip(1) {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                if fields.len() > 9 && fields[3] == "0A" && inodes.contains(fields[9]) {
-                    let (_, port) = fields[1].rsplit_once(':')?;
-                    ports.push(u16::from_str_radix(port, 16).ok()?);
-                }
-            }
-        }
-        ports.sort_unstable();
-        ports.dedup();
-        self.matches(id).then_some(ports)
+                    let inodes = socket_inodes(id.pid)?;
+                    let mut ports = Vec::new();
+                    if !inodes.is_empty() {
+                        let namespace = fs::metadata(format!("/proc/{}/ns/net", id.pid)).ok()?;
+                        let table = tables
+                            .entry((namespace.dev(), namespace.ino()))
+                            .or_insert_with(|| tcp_listeners(id.pid))
+                            .as_ref()?;
+                        ports.extend(inodes.iter().filter_map(|inode| table.get(inode)).copied());
+                        ports.sort_unstable();
+                        ports.dedup();
+                    }
+                    self.matches(id).then_some(ports)
+                })();
+                (id, ports)
+            })
+            .collect()
     }
 
     fn send_signal(&self, id: ProcessIdentity, signal: Signal) -> io::Result<()> {
@@ -399,3 +443,42 @@ fn has_notify_send() -> bool {
 #[cfg(test)]
 #[path = "linux_tests.rs"]
 mod tests;
+
+fn socket_inodes(pid: i32) -> Option<HashSet<u64>> {
+    let mut inodes = HashSet::new();
+    for fd in fs::read_dir(format!("/proc/{pid}/fd")).ok()? {
+        match fs::read_link(fd.ok()?.path()) {
+            Ok(link) => {
+                if let Some(inode) = link
+                    .to_str()?
+                    .strip_prefix("socket:[")
+                    .and_then(|s| s.strip_suffix(']'))
+                {
+                    inodes.insert(inode.parse().ok()?);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(inodes)
+}
+
+fn tcp_listeners(pid: i32) -> Option<HashMap<u64, u16>> {
+    let mut listeners = HashMap::new();
+    for table in ["tcp", "tcp6"] {
+        let data = match fs::read_to_string(format!("/proc/{pid}/net/{table}")) {
+            Ok(data) => data,
+            Err(error) if table == "tcp6" && error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        for line in data.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() > 9 && fields[3] == "0A" {
+                let (_, port) = fields[1].rsplit_once(':')?;
+                listeners.insert(fields[9].parse().ok()?, u16::from_str_radix(port, 16).ok()?);
+            }
+        }
+    }
+    Some(listeners)
+}

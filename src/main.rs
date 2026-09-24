@@ -53,6 +53,19 @@ enum DebugCommand {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
+        Command::Ps => {
+            use ballast::daemon::{
+                files::Paths,
+                ipc::{Client, Method, Reply},
+            };
+            let response = Client::connect(&Paths::from_env()?, std::time::Duration::from_secs(1))
+                .and_then(|mut client| client.request(Method::Ps))
+                .map_err(|error| format!("daemon unreachable: {error}"))?;
+            let Reply::Snapshot { snapshot } = response.reply else {
+                return Err("unexpected daemon snapshot response".into());
+            };
+            print!("{}", ballast::attribution::format_ps(&snapshot));
+        }
         Command::Status { json } => {
             use ballast::daemon::{
                 files::Paths,

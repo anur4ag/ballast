@@ -1,0 +1,52 @@
+shells = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash"]
+
+[[markers]]
+key = "BALLAST_OWNER"
+level = "owner"
+name_key = "BALLAST_OWNER_NAME"
+
+[[markers]]
+key = "CLAUDE_CODE_SESSION_ID"
+level = "agent"
+kind = "claude"
+root_pid_key = "CLAUDE_PID"
+root_binaries = ["claude"]
+
+[[markers]]
+key = "CODEX_THREAD_ID"
+level = "agent"
+kind = "codex"
+root_binaries = ["codex"]
+
+[[markers]]
+key = "CURSOR_AGENT"
+level = "agent"
+kind = "cursor"
+root_binaries = ["cursor-agent", "Cursor"]
+session_id = false
+
+[[binaries]]
+name = "claude"
+kind = "claude"
+exe_basename = "claude"
+
+[[binaries]]
+name = "claude"
+kind = "claude"
+exe_path = "*/claude/versions/*"
+argv0_basename = "claude"
+
+[[binaries]]
+name = "codex"
+kind = "codex"
+exe_basename = "codex"
+
+[[binaries]]
+name = "cursor-agent"
+kind = "cursor"
+exe_basename = "cursor-agent"
+
+[[binaries]]
+name = "Cursor"
+kind = "cursor"
+exe_basename = "Cursor"

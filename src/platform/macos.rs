@@ -7,6 +7,7 @@ use std::process::Command;
 
 unsafe extern "C" {
     fn ballast_listening_port(pid: i32, fd: i32) -> i32;
+    fn ballast_process_cwd(pid: i32, path: *mut libc::c_char, capacity: usize) -> i32;
     fn mach_port_deallocate(task: u32, name: u32) -> i32;
 }
 
@@ -16,6 +17,7 @@ pub struct NativePlatform {
     arg_max: usize,
     pids: Vec<i32>,
     live: HashSet<ProcessIdentity>,
+    enumerated: Option<HashSet<i32>>,
     details: HashMap<ProcessIdentity, (Option<String>, Option<Vec<String>>)>,
 }
 
@@ -36,6 +38,7 @@ impl NativePlatform {
             pids: vec![0; 2048],
             details: HashMap::with_capacity(2048),
             live: HashSet::with_capacity(2048),
+            enumerated: None,
         })
     }
 
@@ -151,6 +154,7 @@ impl Platform for NativePlatform {
             }
             self.pids.resize(self.pids.len() * 2, 0);
         };
+        let enumerated = self.pids[..count].iter().copied().collect();
         let mut processes = Vec::with_capacity(count);
         self.live.clear();
         let now = Instant::now();
@@ -170,12 +174,14 @@ impl Platform for NativePlatform {
             if self
                 .details
                 .get(&id)
-                .is_none_or(|cached| cached.0.as_deref() != exe.as_deref())
+                .is_none_or(|cached| cached.0.as_deref() != exe.as_deref() || cached.1.is_none())
             {
                 let argv = self.args(pid).map(|(argv, _)| argv);
                 self.details.insert(id, (exe.map(Cow::into_owned), argv));
             }
-            let (exe, argv) = self.details.get(&id).expect("inserted process details");
+            let Some((exe, argv)) = self.details.get(&id) else {
+                continue;
+            };
             let process = Process {
                 identity: id,
                 ppid: info.pbi_ppid as i32,
@@ -192,7 +198,31 @@ impl Platform for NativePlatform {
         }
         self.details.retain(|id, _| self.live.contains(id));
         self.cache.retain(&self.live);
+        self.enumerated = Some(enumerated);
         Ok(processes)
+    }
+
+    fn pid_is_present(&self, pid: i32) -> Option<bool> {
+        self.enumerated.as_ref().map(|pids| pids.contains(&pid))
+    }
+
+    fn process_liveness(&self, id: ProcessIdentity) -> ProcessLiveness {
+        if self.live.contains(&id) {
+            ProcessLiveness::Alive
+        } else if self
+            .enumerated
+            .as_ref()
+            .is_some_and(|pids| !pids.contains(&id.pid))
+            || self
+                .cache
+                .0
+                .get(&id.pid)
+                .is_some_and(|(_, p)| p.identity != id)
+        {
+            ProcessLiveness::Gone
+        } else {
+            ProcessLiveness::Unknown
+        }
     }
 
     fn read_environment(&self, id: ProcessIdentity) -> Option<Environment> {
@@ -209,6 +239,28 @@ impl Platform for NativePlatform {
         }
         let metrics = Self::metrics(id.pid)?;
         Self::matches(id).then_some(metrics)
+    }
+
+    fn process_age(&self, id: ProcessIdentity) -> Option<Duration> {
+        let age = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .checked_sub(Duration::from_micros(id.start_time))?;
+        Self::matches(id).then_some(age)
+    }
+
+    fn process_cwd(&self, id: ProcessIdentity) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        if !Self::matches(id) {
+            return None;
+        }
+        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        if unsafe { ballast_process_cwd(id.pid, path.as_mut_ptr().cast(), path.len()) } != 0 {
+            return None;
+        }
+        let path = CStr::from_bytes_until_nul(&path).ok()?;
+        Self::matches(id)
+            .then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
     }
 
     fn pressure(&self) -> io::Result<PressureInputs> {
@@ -496,5 +548,48 @@ mod tests {
         assert!(!env.contains_key("ptr_munge"), "got {env:?}");
         assert!(!env.contains_key("main_stack"), "got {env:?}");
         assert!(!env.contains_key("executable_file"), "got {env:?}");
+    }
+
+    // ---------------------------------------------------------------------
+    // ticket 04 fixup-3: a watched identity's transient argv read failure must be retried on the
+    // very next scan, not cached as a permanent None. `ProcessCache::get` always bypasses the
+    // fast path for a selected (watched/metrics) pid, so this exercises the real
+    // `NativePlatform::list_processes` details-cache retry path end to end, no OS-wide injection.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_watched_identitys_transient_argv_read_failure_is_retried_on_the_next_scan() {
+        let mut platform = NativePlatform::new().expect("native platform available in test env");
+        let own_pid = std::process::id() as i32;
+        let empty = HashSet::new();
+        let first = platform
+            .list_processes(&empty, &empty)
+            .expect("initial scan");
+        let me = first
+            .into_iter()
+            .find(|p| p.identity.pid == own_pid)
+            .expect("this test process's own pid must be present in the process table");
+        assert!(
+            me.argv.is_some(),
+            "this test process must have readable argv to begin with"
+        );
+
+        // Simulate a transient read failure: the exe is still readable and unchanged, but the
+        // cached argv came back None (a truncated or momentarily failed procargs2 read).
+        platform.details.insert(me.identity, (me.exe.clone(), None));
+
+        let watched: HashSet<_> = std::iter::once(me.identity).collect();
+        let second = platform
+            .list_processes(&watched, &empty)
+            .expect("rescan with the identity watched");
+        let recovered = second
+            .into_iter()
+            .find(|p| p.identity == me.identity)
+            .expect("own identity must still be present after the rescan");
+        assert!(
+            recovered.argv.is_some(),
+            "a watched identity's argv must be retried when the cached exe is unchanged but argv \
+             was previously unreadable, not left permanently None"
+        );
     }
 }

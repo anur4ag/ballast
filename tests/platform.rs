@@ -527,6 +527,92 @@ fn check_listening_port(mode: &str, marker: &str) {
 }
 
 #[test]
+fn listening_ports_batch_has_no_cross_identity_leakage_and_reflects_fresh_state() {
+    let mut platform = NativePlatform::new().expect("NativePlatform::new");
+
+    let (identity_a, port_a, _guard_a) = spawn_listener_identity(&mut platform, "listen4");
+    let (identity_b, port_b, _guard_b) = spawn_listener_identity(&mut platform, "listen4");
+
+    let bogus = ProcessIdentity {
+        pid: 0,
+        start_time: 0,
+    };
+    let reused = ProcessIdentity {
+        pid: identity_a.pid,
+        start_time: identity_a.start_time.wrapping_add(1),
+    };
+
+    let batch =
+        platform.listening_ports_batch(&[identity_a, bogus, identity_a, reused, identity_b]);
+
+    let ports_a = batch
+        .get(&identity_a)
+        .and_then(|p| p.as_ref())
+        .expect("identity_a must be readable in the batch");
+    assert!(ports_a.contains(&port_a));
+    assert!(
+        !ports_a.contains(&port_b),
+        "identity_a's batch entry must not leak identity_b's port"
+    );
+
+    let ports_b = batch
+        .get(&identity_b)
+        .and_then(|p| p.as_ref())
+        .expect("identity_b must be readable in the batch");
+    assert!(ports_b.contains(&port_b));
+    assert!(
+        !ports_b.contains(&port_a),
+        "identity_b's batch entry must not leak identity_a's port"
+    );
+
+    assert!(
+        batch.get(&bogus).is_none_or(|p| p.is_none()),
+        "a bogus identity must never resolve to a real port list"
+    );
+    assert!(
+        batch.get(&reused).is_none_or(|p| p.is_none()),
+        "a live pid with the wrong start_time must never resolve to a real port list"
+    );
+
+    // A fresh third listener spawned after the first batch call must show up in a second call,
+    // proving there is no cross-call cache.
+    let (identity_c, port_c, _guard_c) = spawn_listener_identity(&mut platform, "listen4");
+    let second = platform.listening_ports_batch(&[identity_a, identity_c]);
+    let ports_c = second
+        .get(&identity_c)
+        .and_then(|p| p.as_ref())
+        .expect("identity_c must be readable in a fresh batch call");
+    assert!(ports_c.contains(&port_c));
+}
+
+/// Spawns a `listen4` fixture child, waits for it to report its bound port, and returns its
+/// identity, port, and a guard that kills it on drop.
+fn spawn_listener_identity(
+    platform: &mut NativePlatform,
+    mode: &str,
+) -> (ProcessIdentity, u16, ChildGuard) {
+    let mut child = spawn_child(mode, "listening_ports_batch");
+    let child_pid = child.id() as i32;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let guard = ChildGuard(child);
+
+    let status = read_status_line(stdout);
+    let port: u16 = ready_payload(&status)
+        .parse()
+        .unwrap_or_else(|_| panic!("expected port in READY line, got {status:?}"));
+
+    let mut identity = None;
+    wait_until("listening child to appear in list_processes", || {
+        identity = platform
+            .list_processes(&Default::default(), &Default::default())
+            .ok()
+            .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
+        identity.is_some()
+    });
+    (identity.unwrap(), port, guard)
+}
+
+#[test]
 fn pressure_inputs_are_readable_without_root() {
     let platform = NativePlatform::new().expect("NativePlatform::new");
     let capabilities = platform.capabilities();

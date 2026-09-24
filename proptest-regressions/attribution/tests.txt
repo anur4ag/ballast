@@ -1,0 +1,24 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7271f157d8abb01a7784f7110b982a9d6499a69cdd3f7f74c18532c26c1e5c24 # shrinks to seed = 3786027177774715326
+cc a947a3ffb417a6c69b22946a3345783ce6f5e9a207c6a4c8609c45756b0848c4 # shrinks to seed = 17134988201862406096, order_seed = 0
+cc 7c382c3a61c8449b076b478ab5c5b75609502cb1b81dc06e47bb6087a9afd068 # shrinks to seed = 7433361040704141768
+cc 7cde6d01eebd961045c94933edf245378dddde8674e9e8ae0c4a17dc25377114 # shrinks to seed = 16373779983893936340
+cc 4fe2efb812db11b1705d58733ddc2e059b76115b7f6bb3d1752fa06bbadbc29a # shrinks to seed = 10668024742336464406, order_seed = 0
+cc a1bf50bc25fb78221cf5dba693ebff1b73ab2e3ef1d46898f949b3af043db99f # shrinks to seed = 7036151237891355734, order_seed = 0
+cc 8217578701f6b4a990854827258e3c93565fe0d7d41d494e1e8ad82f39b6cd3e # shrinks to seed = 13853191243278725600, order_seed = 0
+cc 031732c6ad8f923fabeb34b0b363a2b78f400f86c2984a20802db0b8821fdac9 # shrinks to seed = 13697448676912192970
+cc 9bfefc9a43839919f016d6c751ecc74dc79daf30adfce045b1717c1f2a465b41 # shrinks to seed = 3618724402699227764, order_seed = 0
+cc 6e16d841ae1824ffbeb7dd4de26f0b43b70920d9fb02dbbcda7d60777b93edb6 # shrinks to seed = 6280910674545751510
+cc 9e24e739adf5cc7bf9f582e255726b0a4799f5166289ad8df6260e2d224e9d54 # shrinks to seed = 9222380799457441802
+cc 4d1b6e83826c315aa7b263b18c1b1014620eacade55151ef63d27bb96f3d8446 # shrinks to seed = 1351928379025881672, order_seed = 0
+cc 9dff6c2543f8d4e92aa742f920f01ef7b4bf7bbbc1f04066896bdb4aaa3da17d # shrinks to seed = 17093178278508533976
+cc 9b9e5487c65604d0aa190a4e958c241570ce438f757561a2e42e1248fac43ede # shrinks to seed = 9707365847154936876
+cc 0c24035ed188172453b670625f704515481d5ac79cfaf35f97c93a9640639610 # shrinks to seed = 7209977609258981192, order_seed = 0
+cc 030e7a9530be61dcaa9363e40d4eecef910be1afa95d153be73ec1654fa20e2b # shrinks to seed = 7646826975209397212, order_seed = 0
+cc aa7c5132eb96340de9ac1fc6c7cbda7cf8d815c262b283f0b349b3b9871e7b08 # shrinks to seed = 10436475822817190378, order_seed = 0
+cc 580bb1d78ba69a6884242f59243d0706fb1737486ff694b9fa200bf956d441d9 # shrinks to seed = 16174314706627908250

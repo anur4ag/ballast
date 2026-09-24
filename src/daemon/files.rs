@@ -71,6 +71,8 @@ pub enum Mode {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mode: Mode,
+    pub markers: Vec<crate::attribution::Marker>,
+    pub shells: Vec<String>,
     pub log_max_bytes: u64,
     pub log_rotations: usize,
 }
@@ -78,6 +80,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Enforce,
+            markers: Vec::new(),
+            shells: Vec::new(),
             log_max_bytes: 5 * 1024 * 1024,
             log_rotations: 3,
         }
@@ -96,6 +100,27 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "log_max_bytes must be positive and log_rotations must be 1..=10",
+            ));
+        }
+        let mut keys = std::collections::HashSet::new();
+        if crate::attribution::Marker::builtins()
+            .iter()
+            .chain(&config.markers)
+            .any(|m| !m.valid() || !keys.insert(m.key.clone()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "markers must have valid, unique keys and agent kinds",
+            ));
+        }
+        if config
+            .shells
+            .iter()
+            .any(|shell| shell.is_empty() || shell.contains(['/', '\0']))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shells must contain executable basenames",
             ));
         }
         Ok(config)

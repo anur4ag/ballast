@@ -22,6 +22,13 @@ pub struct ProcessIdentity {
     pub start_time: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessLiveness {
+    Alive,
+    Gone,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Process {
     pub identity: ProcessIdentity,
@@ -102,9 +109,36 @@ pub trait Platform {
     /// None means unknown, including permission denied, truncation or identity mismatch.
     fn read_environment(&self, process: ProcessIdentity) -> Option<Environment>;
     fn process_metrics(&self, process: ProcessIdentity) -> Option<ProcessMetrics>;
+    /// PID enumeration evidence without requiring a readable process identity.
+    fn pid_is_present(&self, _pid: i32) -> Option<bool> {
+        None
+    }
+    /// Evidence from the latest successful scan; an unreadable enumerated PID is unknown.
+    fn process_liveness(&self, _process: ProcessIdentity) -> ProcessLiveness {
+        ProcessLiveness::Unknown
+    }
+
+    /// Sampled lazily for attributed processes; None means unknown or identity changed.
+    fn process_age(&self, _process: ProcessIdentity) -> Option<Duration> {
+        None
+    }
+    /// Exact OS cwd, sampled only for agent roots on the slow cadence.
+    fn process_cwd(&self, _process: ProcessIdentity) -> Option<std::path::PathBuf> {
+        None
+    }
     fn pressure(&self) -> io::Result<PressureInputs>;
     /// Only call for attributed processes, on demand or on a slow cadence.
     fn listening_ports(&self, process: ProcessIdentity) -> Option<Vec<u16>>;
+    /// One sampling round. Platforms may share namespace-wide socket tables across targets.
+    fn listening_ports_batch(
+        &self,
+        processes: &[ProcessIdentity],
+    ) -> HashMap<ProcessIdentity, Option<Vec<u16>>> {
+        processes
+            .iter()
+            .map(|&id| (id, self.listening_ports(id)))
+            .collect()
+    }
     /// Rejects invalid PIDs and changed identities before signalling.
     fn send_signal(&self, process: ProcessIdentity, signal: Signal) -> io::Result<()>;
     /// False means unavailable; the caller should keep the message in its log/UI.
