@@ -2,7 +2,6 @@
 """Generate the formula and signed APT repository from the release's native packages."""
 import gzip
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
