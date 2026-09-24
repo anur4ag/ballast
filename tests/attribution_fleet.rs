@@ -469,6 +469,78 @@ fn attributed_fleet_benchmark_at_scale() {
         port_round_samples.len(),
         port_round_samples.iter().max().copied().unwrap_or(0) as f64 / 1_000_000.0
     );
+    // Compare the port batch itself on the same live fleet, excluding unrelated tick work.
+    let platform = NativePlatform::new().expect("port benchmark platform");
+    for all in [false, true] {
+        let targets: Vec<_> = snapshot
+            .attribution
+            .processes
+            .iter()
+            .filter(|p| {
+                p.agent_id.is_some()
+                    && (all
+                        || p.workload_id.as_ref().is_some_and(|id| {
+                            snapshot.attribution.workloads.iter().any(|w| {
+                                w.id == *id && w.class == ballast::attribution::WorkloadClass::Batch
+                            })
+                        }))
+            })
+            .map(|p| p.identity)
+            .collect();
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let start = Instant::now();
+            std::hint::black_box(platform.listening_ports_batch(&targets));
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "direct port round all={all}: {} targets, median {:.3} ms, max {:.3} ms",
+            targets.len(),
+            times[2],
+            times[4]
+        );
+    }
+    assert!(
+        snapshot
+            .attribution
+            .agents
+            .iter()
+            .filter(|a| owned_agent_ids.contains(a.id.as_str()))
+            .all(|a| a.kind == "claude" && a.session_id.is_some())
+    );
+    for agent in ["claude", "codex"] {
+        let mut times = Vec::new();
+        for _ in 0..20 {
+            let started = Instant::now();
+            let mut hook = Command::new(env!("CARGO_BIN_EXE_ballast"))
+                .args(["hook", agent])
+                .env("BALLAST_HOME", &home.0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            hook.stdin.take().unwrap().write_all(br#"{"session_id":"fleet-caller","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pkill blt-fleet"}}"#).unwrap();
+            let output = hook.wait_with_output().unwrap();
+            assert!(output.status.success());
+            assert!(output.stdout.is_empty()); // Observe mode records the would-deny.
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "fleet name hook {agent}: median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+            times[10], times[18], times[19]
+        );
+    }
+    let decisions = std::fs::read_to_string(home.0.join("log/decisions.jsonl")).unwrap();
+    println!(
+        "fleet recorded would-denies: {}",
+        decisions
+            .lines()
+            .filter(|line| line.contains("\"event\":\"deny\""))
+            .count()
+    );
     let rss = Command::new("ps")
         .args(["-o", "rss=", "-p", &daemon.0.id().to_string()])
         .output()
@@ -537,6 +609,7 @@ fn relay_fixture() {
             .env(MODE_ENV, "root")
             .env(HELPER_EXE_ENV, &exe)
             .env("BALLAST_OWNER", format!("{tag}-{i}"))
+            .env("BALLAST_TEST_CLAUDE", format!("{tag}-{i}"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -613,8 +686,17 @@ fn root_fixture() {
 #[ignore]
 fn daemon_fixture() {
     let paths = Paths::from_env().expect("BALLAST_HOME must be set");
-    std::fs::write(paths.base.join("config.toml"), "mode = \"observe\"\n")
-        .expect("observe benchmark");
+    std::fs::write(
+        paths.base.join("config.toml"),
+        r#"mode = "observe"
+[[markers]]
+key = "BALLAST_TEST_CLAUDE"
+level = "agent"
+kind = "claude"
+root_binaries = ["blt-fleet-worker"]
+"#,
+    )
+    .expect("observe benchmark");
     ballast::daemon::run(paths).expect("daemon run");
 }
 

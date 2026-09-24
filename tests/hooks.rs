@@ -545,14 +545,16 @@ struct DaemonGuard {
 }
 impl DaemonGuard {
     fn start(tag: &str) -> Self {
+        Self::start_config(tag, "mode = \"observe\"\n")
+    }
+    fn start_config(tag: &str, config: &str) -> Self {
         let home = TempHome::new(tag);
         // Observe mode: this spawns a real daemon against the real host process table, and
         // the guardian must never signal (freeze/stop) an unrelated real process just
         // because the ambient host happens to be under ("Critical") pressure while this
         // test runs. Admission's own decisions are unaffected -- observe mode only
         // suppresses acting on a freeze, not the admit/hold/deny path this test checks.
-        std::fs::write(home.path.join("config.toml"), "mode = \"observe\"\n")
-            .expect("write temp config.toml");
+        std::fs::write(home.path.join("config.toml"), config).expect("write temp config.toml");
         let child = Command::new(env!("CARGO_BIN_EXE_ballast"))
             .arg("daemon")
             .env("BALLAST_HOME", &home.path)
@@ -595,5 +597,347 @@ fn healthy_daemon_admits_a_light_command_quickly() {
     assert!(
         elapsed < Duration::from_secs(1),
         "a healthy-path admit should be fast, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn post_tool_hints_are_additional_context_only_on_the_right_event() {
+    for agent in ["claude", "codex"] {
+        for event in ["PostToolUse", "PreToolUse", "SessionStart"] {
+            let home = TempHome::new("hint");
+            let daemon = fake_daemon(&home, |_request, stream| {
+                write_frame(
+                    stream,
+                    &json!({"version": 1, "type": "hook", "decision": {
+                        "decision": "hint", "context": "Port 3000 is held by another agent."
+                    }}),
+                );
+            });
+            let (output, _) = run_hook(
+                &home,
+                agent,
+                &json!({
+                    "session_id": "hint-session", "hook_event_name": event,
+                    "tool_name": "Bash", "tool_input": {"command": "npm start"},
+                    "tool_response": {"stderr": "Port 3000 is in use"}
+                })
+                .to_string(),
+                &[],
+            );
+            daemon.join().unwrap();
+            assert!(output.status.success());
+            if event == "PostToolUse" {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                    json!({
+                        "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Port 3000 is held by another agent."}
+                    })
+                );
+            } else {
+                assert!(output.stdout.is_empty());
+            }
+        }
+    }
+}
+
+struct OwnedServer(Child);
+impl Drop for OwnedServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn server_fixture(
+    home: &TempHome,
+    exe: &std::path::Path,
+    marker: &str,
+    session: &str,
+) -> (OwnedServer, u16) {
+    let ready = home.path.join(session);
+    let mut command = Command::new(exe);
+    command
+        .args(["port_server_fixture", "--exact", "--ignored"])
+        .env_clear()
+        .env(marker, session)
+        .env("BALLAST_TEST_READY", &ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = OwnedServer(command.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(port) = std::fs::read_to_string(&ready) {
+            if let Ok(port) = port.parse() {
+                return (child, port);
+            }
+        }
+        assert!(Instant::now() < deadline, "server fixture readiness");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+#[test]
+#[ignore]
+fn port_server_fixture() {
+    let Ok(ready) = std::env::var("BALLAST_TEST_READY") else {
+        return;
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std::fs::write(ready, listener.local_addr().unwrap().port().to_string()).unwrap();
+    thread::sleep(Duration::from_secs(60));
+    drop(listener);
+}
+
+#[test]
+fn two_agent_port_server_survives_cross_agent_hooks_and_reports_collision() {
+    use ballast::daemon::files::{Config, Mode, Paths, RotatingLog};
+    use ballast::daemon::ipc::{Client, Method, PendingRequest, Reply};
+    use ballast::hooks::{Admission, HookRequest, HookState};
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    let home = TempHome::new("owned-servers");
+    let exe = home.path.join("node");
+    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    let (mut a, port_a) = server_fixture(&home, &exe, "BALLAST_TEST_CLAUDE", "agent-a");
+    let (mut b, _port_b) = server_fixture(&home, &exe, "BALLAST_TEST_CODEX", "agent-b");
+    let daemon = DaemonGuard::start_config(
+        "port-observer",
+        r#"
+mode = "observe"
+[[markers]]
+key = "BALLAST_TEST_CLAUDE"
+level = "agent"
+kind = "claude"
+root_binaries = ["node"]
+[[markers]]
+key = "BALLAST_TEST_CODEX"
+level = "agent"
+kind = "codex"
+root_binaries = ["node"]
+"#,
+    );
+    let paths = Paths {
+        base: daemon.home.path.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let snapshot = loop {
+        let response = Client::connect(&paths, Duration::from_secs(1))
+            .unwrap()
+            .request(Method::Snapshot)
+            .unwrap();
+        if let Reply::Snapshot { snapshot } = response.reply {
+            if snapshot.attribution.agents.iter().any(|agent| {
+                agent.kind == "claude" && agent.session_id.as_deref() == Some("agent-a")
+            }) && snapshot
+                .attribution
+                .agents
+                .iter()
+                .any(|a| a.kind == "codex" && a.session_id.as_deref() == Some("agent-b"))
+            {
+                let mut snapshot = Arc::try_unwrap(snapshot).unwrap();
+                snapshot.status.mode = Mode::Enforce;
+                break Arc::new(snapshot);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native ownership and port snapshot"
+        );
+        thread::sleep(Duration::from_millis(30));
+    };
+    // The real observer stays in observe mode. Only hook policy is enforced, so this
+    // test can never freeze or clean up an unrelated process on a pressured host.
+    for (agent, session, event, command, deny) in [
+        (
+            "codex",
+            "agent-b",
+            "PreToolUse",
+            "pkill node".to_owned(),
+            true,
+        ),
+        (
+            "codex",
+            "agent-b",
+            "PreToolUse",
+            format!("lsof -ti:{port_a} | xargs kill"),
+            true,
+        ),
+        (
+            "claude",
+            "agent-a",
+            "PreToolUse",
+            format!("lsof -t -i:{port_a} | xargs kill"),
+            false,
+        ),
+        (
+            "claude",
+            "agent-b",
+            "PostToolUse",
+            "start server".to_owned(),
+            false,
+        ),
+        (
+            "codex",
+            "agent-b",
+            "PostToolUse",
+            "start server".to_owned(),
+            false,
+        ),
+    ] {
+        let policy_home = TempHome::new("port-policy");
+        let mut policy_snapshot: ballast::daemon::Snapshot =
+            serde_json::from_value(serde_json::to_value(snapshot.as_ref()).unwrap()).unwrap();
+        // Model which agent launched this hook while exercising real peer credentials
+        // and the new hook process's native parent chain.
+        let caller = policy_snapshot
+            .attribution
+            .agents
+            .iter()
+            .find(|a| a.kind == agent && a.session_id.as_deref() == Some(session))
+            .map(|a| a.id.clone());
+        policy_snapshot
+            .attribution
+            .processes
+            .iter_mut()
+            .find(|p| p.identity.pid == std::process::id() as i32)
+            .unwrap()
+            .agent_id = caller;
+        let log_path = policy_home.path.join("decisions.jsonl");
+        let policy = fake_daemon(&policy_home, move |wire, stream| {
+            let request: HookRequest = serde_json::from_value(wire["payload"].clone()).unwrap();
+            let (reply, receiver) = mpsc::channel();
+            let pending = PendingRequest {
+                evidence: ballast::hooks::lookup(
+                    &request,
+                    &policy_snapshot,
+                    ballast::daemon::ipc::peer_pid(stream),
+                ),
+                method: Method::Hook {
+                    payload: Value::Null,
+                },
+                reply,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            Admission::new(&[]).handle(
+                request,
+                pending,
+                &policy_snapshot,
+                &mut HookState::default(),
+                &mut RotatingLog::open(log_path, &Config::default()).unwrap(),
+                Instant::now(),
+            );
+            write_frame(
+                stream,
+                &serde_json::to_value(receiver.recv().unwrap()).unwrap(),
+            );
+        });
+        let collision = std::net::TcpListener::bind(("127.0.0.1", port_a)).unwrap_err();
+        assert_eq!(collision.kind(), std::io::ErrorKind::AddrInUse);
+        let input = json!({"session_id": session, "hook_event_name": event, "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stderr": format!("EADDRINUSE: {collision}, port: {port_a}")}});
+        let (output, elapsed) = run_hook(&policy_home, agent, &input.to_string(), &[]);
+        if event == "PreToolUse" {
+            println!(
+                "native {} hook (deny={deny}): {:.3} ms",
+                if command == "pkill node" {
+                    "name"
+                } else {
+                    "port"
+                },
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+        policy.join().unwrap();
+        assert!(output.status.success());
+        if deny {
+            let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+            if command == "pkill node" {
+                assert!(output.to_string().contains(&b.0.id().to_string()));
+            }
+        } else if event == "PostToolUse" {
+            let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let context = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(
+                context.contains(&format!("Port {port_a}"))
+                    && context.contains(&format!("PID {}", a.0.id()))
+            );
+        } else {
+            assert!(output.stdout.is_empty());
+        }
+        assert!(a.0.try_wait().unwrap().is_none() && b.0.try_wait().unwrap().is_none());
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port_a)).is_ok());
+    }
+    // Exercise the real daemon IPC worker's on-demand lookup as well as policy enforcement.
+    // Agent roots have no cached ports, so this cannot pass using classification samples.
+    for agent in ["claude", "codex"] {
+        let input = json!({"session_id": "agent-b", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "start server"}, "tool_response": {"stderr": format!("Port {port_a} is in use")}});
+        let (output, elapsed) = run_hook(&daemon.home, agent, &input.to_string(), &[]);
+        let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let context = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains(&format!("PID {}", a.0.id())));
+        println!(
+            "{agent} native on-demand hint: {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[test]
+fn native_name_sampling_matches_pgrep_and_killall() {
+    use ballast::platform::{NativePlatform, Platform};
+    let home = TempHome::new("native-name");
+    let name = format!("blt{}longprocessname", std::process::id());
+    let exe = home.path.join(&name);
+    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    let (child, _) = server_fixture(&home, &exe, "BALLAST_TEST_UNUSED", "native");
+    let mut platform = NativePlatform::new().unwrap();
+    let processes = platform
+        .list_processes(&Default::default(), &Default::default())
+        .unwrap();
+    let process = processes
+        .iter()
+        .find(|p| p.identity.pid == child.0.id() as i32)
+        .unwrap();
+    let expected = if cfg!(target_os = "linux") {
+        &name[..15]
+    } else {
+        &name
+    };
+    if cfg!(target_os = "linux") {
+        assert_eq!(process.name.as_deref(), Some(expected));
+    }
+    let pgrep = Command::new("pgrep")
+        .args(["-x", expected])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&pgrep.stdout)
+            .split_whitespace()
+            .any(|pid| pid == child.0.id().to_string())
+    );
+    let flags = if cfg!(target_os = "macos") {
+        "-s"
+    } else {
+        "-0"
+    };
+    let killall = Command::new("killall")
+        .args([flags, "-v", &name])
+        .output()
+        .unwrap();
+    assert!(
+        killall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&killall.stderr)
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&killall.stdout),
+        String::from_utf8_lossy(&killall.stderr)
+    );
+    assert!(
+        output.contains(&child.0.id().to_string()),
+        "native killall did not identify test process"
     );
 }

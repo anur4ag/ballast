@@ -63,7 +63,7 @@ impl NativePlatform {
         Self::bsd(id.pid).is_some_and(|info| identity(&info) == id)
     }
 
-    fn args(&self, pid: i32) -> Option<(Vec<String>, Option<Environment>)> {
+    fn args(&self, pid: i32, environment: bool) -> Option<(Vec<String>, Option<Environment>)> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut bytes = vec![0; self.arg_max];
         let mut size = bytes.len();
@@ -81,7 +81,7 @@ impl NativePlatform {
             return None;
         }
         bytes.truncate(size);
-        parse_args(&bytes)
+        parse_args(&bytes, environment)
     }
 
     fn metrics(pid: i32) -> Option<ProcessMetrics> {
@@ -176,7 +176,7 @@ impl Platform for NativePlatform {
                 .get(&id)
                 .is_none_or(|cached| cached.0.as_deref() != exe.as_deref() || cached.1.is_none())
             {
-                let argv = self.args(pid).map(|(argv, _)| argv);
+                let argv = self.args(pid, false).map(|(argv, _)| argv);
                 self.details.insert(id, (exe.map(Cow::into_owned), argv));
             }
             let Some((exe, argv)) = self.details.get(&id) else {
@@ -188,6 +188,15 @@ impl Platform for NativePlatform {
                 pgid: info.pbi_pgid as i32,
                 uid: info.pbi_uid,
                 stopped: info.pbi_status == 4,
+                name: {
+                    let bytes = &info.pbi_comm;
+                    let bytes: Vec<u8> = bytes
+                        .iter()
+                        .take_while(|&&b| b != 0)
+                        .map(|&b| b as u8)
+                        .collect();
+                    String::from_utf8(bytes).ok()
+                },
                 exe: exe.clone(),
                 argv: argv.clone(),
                 metrics: metrics.contains(&id).then(|| Self::metrics(pid)).flatten(),
@@ -225,11 +234,24 @@ impl Platform for NativePlatform {
         }
     }
 
+    fn process_parent(&self, pid: i32) -> Option<(ProcessIdentity, i32)> {
+        let info = Self::bsd(pid)?;
+        Some((identity(&info), info.pbi_ppid as i32))
+    }
+
+    fn read_arguments(&self, id: ProcessIdentity) -> Option<Vec<String>> {
+        if !Self::matches(id) {
+            return None;
+        }
+        let (argv, _) = self.args(id.pid, false)?;
+        Self::matches(id).then_some(argv)
+    }
+
     fn read_environment(&self, id: ProcessIdentity) -> Option<Environment> {
         if !Self::matches(id) {
             return None;
         }
-        let (_, env) = self.args(id.pid)?;
+        let (_, env) = self.args(id.pid, true)?;
         Self::matches(id).then_some(env?)
     }
 
@@ -414,7 +436,7 @@ fn sysctl_value<T>(name: &CStr) -> io::Result<T> {
     Ok(unsafe { value.assume_init() })
 }
 
-fn parse_args(bytes: &[u8]) -> Option<(Vec<String>, Option<Environment>)> {
+fn parse_args(bytes: &[u8], environment: bool) -> Option<(Vec<String>, Option<Environment>)> {
     let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
     if argc < 0 {
         return None;
@@ -429,6 +451,9 @@ fn parse_args(bytes: &[u8]) -> Option<(Vec<String>, Option<Environment>)> {
         let end = rest.iter().position(|&b| b == 0)?;
         argv.push(String::from_utf8_lossy(&rest[..end]).into_owned());
         rest = &rest[end + 1..];
+    }
+    if !environment {
+        return Some((argv, None));
     }
     // SIP may omit the entire environment while still returning complete argv.
     // An empty string terminates the environment before Apple's auxiliary data.
@@ -479,7 +504,8 @@ mod tests {
             b"FOO=bar\0BAZ=qux\0",
         );
         bytes.push(0); // envp terminator: empty string
-        let (argv, env) = parse_args(&bytes).expect("well-formed procargs2 buffer");
+        let (argv, env) = parse_args(&bytes, true).expect("well-formed procargs2 buffer");
+        assert_eq!(parse_args(&bytes, false), Some((argv.clone(), None)));
         let env = env.expect("a terminated env section is known");
         assert_eq!(argv, vec!["/bin/true".to_string(), "--flag".to_string()]);
         assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
@@ -491,7 +517,7 @@ mod tests {
         // argc claims 2 entries but only one argv string is present and
         // nothing (not even an env section) follows it.
         let bytes = procargs2(2, "/bin/true", 0, &["/bin/true"], b"");
-        assert!(parse_args(&bytes).is_none());
+        assert!(parse_args(&bytes, true).is_none());
     }
 
     #[test]
@@ -499,7 +525,7 @@ mod tests {
         // Nothing at all follows argv: SIP can truncate the sysctl result
         // right there. argv must still come back; env is unknown, not empty.
         let bytes = procargs2(1, "/bin/true", 0, &["/bin/true"], b"");
-        let (argv, env) = parse_args(&bytes).expect("argv should still parse");
+        let (argv, env) = parse_args(&bytes, true).expect("argv should still parse");
         assert_eq!(argv, vec!["/bin/true".to_string()]);
         assert!(env.is_none(), "got {env:?}");
     }
@@ -509,7 +535,7 @@ mod tests {
         // argv is complete, but the env bytes have no NUL at all: env is
         // unterminated, so it is unknown rather than failing the whole parse.
         let bytes = procargs2(1, "/bin/true", 0, &["/bin/true"], b"FOO=bar");
-        let (argv, env) = parse_args(&bytes).expect("argv should still parse");
+        let (argv, env) = parse_args(&bytes, true).expect("argv should still parse");
         assert_eq!(argv, vec!["/bin/true".to_string()]);
         assert!(env.is_none(), "got {env:?}");
     }
@@ -520,7 +546,7 @@ mod tests {
         // entries before it), same as a genuinely empty environment; Apple
         // auxiliary strings follow but must not be picked up as entries.
         let bytes = procargs2(1, "/bin/true", 0, &["/bin/true"], b"\0ptr_munge=\0");
-        let (_, env) = parse_args(&bytes).expect("well-formed procargs2 buffer");
+        let (_, env) = parse_args(&bytes, true).expect("well-formed procargs2 buffer");
         let env = env.expect("a terminated (even if empty) env section is known");
         assert!(env.is_empty(), "got {env:?}");
     }
@@ -534,7 +560,7 @@ mod tests {
         let mut bytes = procargs2(1, "/bin/true", 0, &["/bin/true"], b"FOO=bar\0");
         bytes.push(0); // envp terminator: empty string
         bytes.extend_from_slice(b"ptr_munge=\0main_stack=\0executable_file=0x1,0x2\0");
-        let (_, env) = parse_args(&bytes).expect("well-formed procargs2 buffer");
+        let (_, env) = parse_args(&bytes, true).expect("well-formed procargs2 buffer");
         let env = env.expect("a terminated env section is known");
         assert_eq!(
             env.len(),
@@ -588,5 +614,23 @@ mod tests {
             "a watched identity's argv must be retried when the cached exe is unchanged but argv \
              was previously unreadable, not left permanently None"
         );
+    }
+    #[test]
+    fn on_demand_arguments_ignore_cache_and_validate_identity() {
+        let mut platform = NativePlatform::new().unwrap();
+        let processes = platform
+            .list_processes(&HashSet::new(), &HashSet::new())
+            .unwrap();
+        let me = processes
+            .iter()
+            .find(|p| p.identity.pid == std::process::id() as i32)
+            .unwrap();
+        platform.details.get_mut(&me.identity).unwrap().1 = Some(vec!["stale".into()]);
+        assert_eq!(platform.read_arguments(me.identity), me.argv);
+        let stale = ProcessIdentity {
+            start_time: me.identity.start_time + 1,
+            ..me.identity
+        };
+        assert!(platform.read_arguments(stale).is_none());
     }
 }

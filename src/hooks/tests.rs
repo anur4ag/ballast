@@ -143,6 +143,7 @@ fn connection() -> (PendingRequest, mpsc::Receiver<Response>, Arc<AtomicBool>) {
     let (reply, receiver) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let request = PendingRequest {
+        evidence: Default::default(),
         method: Method::Hook {
             payload: serde_json::Value::Null,
         },
@@ -975,4 +976,395 @@ fn tick_treats_unknown_pressure_as_release_ready() {
         "an unknown pressure sample must be treated as release-ready, not as still-elevated",
     );
     assert_eq!(decision(response), HookDecision::Admit);
+}
+
+fn protection_snapshot() -> Snapshot {
+    let mut snapshot = known_snapshot(Level::Elevated, true, Mode::Enforce);
+    snapshot.attribution.agents = vec![
+        attribution_agent("a", "claude", "s1", AgentState::Thinking),
+        attribution_agent("b", "codex", "s2", AgentState::Thinking),
+    ];
+    snapshot.attribution.agents[0].root = Some(ProcessIdentity {
+        pid: 11,
+        start_time: 1,
+    });
+    snapshot.attribution.agents[1].root = Some(ProcessIdentity {
+        pid: 12,
+        start_time: 1,
+    });
+    for (pid, name, agent, ports) in [
+        (11, "node", Some("a"), vec![3000]),
+        (12, "node", Some("b"), vec![3001]),
+        (13, "node", None, vec![3002]),
+        (14, "node-helper", Some("a"), vec![]),
+        (15, "renamed-server", Some("a"), vec![]),
+    ] {
+        let identity = ProcessIdentity { pid, start_time: 1 };
+        snapshot.processes.push(crate::platform::Process {
+            identity,
+            ppid: 1,
+            pgid: pid,
+            uid: 1000,
+            stopped: false,
+            name: Some(name.into()),
+            exe: Some("/bin/node".into()),
+            argv: Some(vec![name.into(), "server-script".into()]),
+            metrics: None,
+        });
+        snapshot.attribution.processes.push(ProcessAttribution {
+            identity,
+            owner_id: None,
+            agent_id: agent.map(str::to_owned),
+            workload_id: None,
+            role: ProcessRole::Workload,
+            environment_known: true,
+            listening_ports: Some(ports),
+            ports_sampled_at_ms: Some(1),
+        });
+    }
+    snapshot
+}
+
+#[test]
+fn kill_protection_literal_commands_and_fail_open_boundaries() {
+    let snapshot = protection_snapshot();
+    for (command, denied) in [
+        ("kill 11", true),
+        ("kill 12 13", false),
+        ("kill 999", false),
+        ("kill -TERM 11 12", true),
+        ("kill -9 11", true),
+        ("kill -s SIGINT 11", true),
+        ("kill -- 11", true),
+        ("kill -0 11", false),
+        ("kill -CONT 11", false),
+        ("kill -STOP 11", false),
+        ("kill -USR1 11", false),
+        ("kill -USR2 11", false),
+        ("kill -WINCH 11", false),
+        ("kill -INFO 11", false),
+        ("kill -HUP 11", true),
+        ("kill -QUIT 11", true),
+        ("kill -ABRT 11", true),
+        ("kill -15 11", true),
+        ("kill -1 11", true),
+        ("kill -2 11", true),
+        ("kill -3 11", true),
+        ("kill -6 11", true),
+        ("kill -s CONT 11", false),
+        ("kill -1", false),
+        ("kill 0", false),
+        ("kill -- -11", false),
+        ("kill 11 $PID", false),
+        ("kill $(pgrep node)", false),
+        ("kill `pgrep node`", false),
+        ("pkill node", true),
+        ("pkill -x node", true),
+        ("pkill -x node-helper", true),
+        ("pkill -f server-script", true),
+        ("pkill -fx 'node server-script'", true),
+        ("pkill -x renamed-server", true),
+        ("pkill -f 'server.*'", false),
+        ("pkill '^node$'", false),
+        ("pkill -u 1000 node", false),
+        ("pkill $NAME", false),
+        ("pkill -STOP node", false),
+        ("pkill -TERM missing", false),
+        ("killall node", true),
+        ("killall nod", false),
+        ("killall -9 node", true),
+        ("killall -CONT node", false),
+        ("killall node -STOP", false),
+        ("pkill -term node", true),
+        ("killall -f server-script", false),
+        ("fuser -k 3000/tcp", cfg!(target_os = "linux")),
+        ("fuser -k -n tcp 3000", cfg!(target_os = "linux")),
+        ("fuser -k -TERM 3000/tcp", cfg!(target_os = "linux")),
+        ("fuser -k -STOP 3000/tcp", false),
+        ("fuser 3000/tcp", false),
+        ("fuser -k /tmp/file", false),
+        ("fuser -k 3000/udp", false),
+        ("lsof -ti:3000 | xargs kill", true),
+        ("lsof -t -i:3000 | xargs kill -9", true),
+        ("lsof -ti:3000 | xargs -r kill -s TERM", true),
+        ("lsof -ti:3000 | xargs kill -0", false),
+        ("lsof -ti:3001 | xargs kill", false),
+        ("lsof -ti:3002 | xargs kill", false),
+        ("lsof -ti:$PORT | xargs kill", false),
+        ("echo 11 | xargs kill", false),
+        ("lsof -ti:3000; xargs kill", false),
+        ("echo 'pkill node'", false),
+        ("echo 'lsof -ti:3000 | xargs kill'", false),
+        ("echo fine && pkill node", true),
+        ("echo fine; kill 11", true),
+        ("command /bin/kill 11", true),
+        ("env FLAG=x pkill node", true),
+        ("pkill 'no\\de'", false),
+        ("pkill \"no\\de\"", false),
+        ("cat <<EOF\npkill node\nEOF", false),
+        ("sh -c 'pkill node'", false),
+        ("kill 11 > $OUTPUT", false),
+        ("# kill 11\necho fine", false),
+        ("echo fine # comment\nkill 11", true),
+        ("pkill no\\\nde", true),
+    ] {
+        let request = hook_request(AgentKind::Codex, "s2", Event::PreToolUse, Some(command));
+        assert_eq!(
+            super::protection::deny(&request, &snapshot, &test_evidence(&snapshot)).is_some(),
+            denied,
+            "{command}"
+        );
+    }
+    let request = hook_request(
+        AgentKind::Codex,
+        "s2",
+        Event::PreToolUse,
+        Some("pkill node"),
+    );
+    let reason = super::protection::deny(&request, &snapshot, &test_evidence(&snapshot)).unwrap();
+    assert!(
+        reason.contains("2 processes belonging to 1 other agents"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("PIDs are 12; kill those directly"),
+        "{reason}"
+    );
+    let mut stale = protection_snapshot();
+    stale.attribution.processes[0].identity.start_time = 2;
+    let request = hook_request(AgentKind::Codex, "s2", Event::PreToolUse, Some("kill 11"));
+    assert!(super::protection::deny(&request, &stale, &test_evidence(&stale)).is_none());
+}
+
+#[test]
+fn protection_precedes_holds_and_observe_only_logs() {
+    for (mode, tag) in [
+        (Mode::Enforce, "protect"),
+        (Mode::Observe, "observe-protect"),
+    ] {
+        let mut snapshot = protection_snapshot();
+        snapshot.status.mode = mode;
+        let home = TestHome::new(tag);
+        let mut log = home.log();
+        let (mut connection, receive, _cancelled) = connection();
+        connection.evidence = test_evidence(&snapshot);
+        Admission::new(&[]).handle(
+            hook_request(
+                AgentKind::Codex,
+                "s2",
+                Event::PreToolUse,
+                Some("pkill node; cargo build"),
+            ),
+            connection,
+            &snapshot,
+            &mut HookState::default(),
+            &mut log,
+            Instant::now(),
+        );
+        let result = decision(receive.try_recv().unwrap());
+        assert_eq!(
+            matches!(result, HookDecision::Deny { .. }),
+            matches!(mode, Mode::Enforce)
+        );
+        let log = home.decisions();
+        assert!(log.contains("\"event\":\"deny\""));
+        assert!(!log.contains("pkill node"));
+    }
+}
+
+#[test]
+fn port_hints_on_both_agents_and_structured_outputs() {
+    let snapshot = protection_snapshot();
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        for (output, expected) in [
+            (
+                serde_json::json!("listen EADDRINUSE: address already in use :::3000"),
+                true,
+            ),
+            (
+                serde_json::json!({"stderr": "address already in use 127.0.0.1:3000"}),
+                true,
+            ),
+            (
+                serde_json::json!({"output": [{"text": "Port 3000 is in use"}]}),
+                true,
+            ),
+            (
+                serde_json::json!({"stderr": "EADDRINUSE\n  port: 3000"}),
+                true,
+            ),
+            (serde_json::json!("EADDRINUSE pid 3000"), false),
+            (serde_json::json!("Port 5555 is in use"), false),
+            (serde_json::json!("listening on port 3000"), false),
+        ] {
+            let mut request =
+                hook_request(agent.clone(), "s2", Event::PostToolUse, Some("npm start"));
+            request.tool_response = Some(output);
+            let hint = super::protection::hint(&request, &snapshot, &test_evidence(&snapshot));
+            assert_eq!(hint.is_some(), expected, "{:?}", request.tool_response);
+            if let Some(hint) = hint {
+                assert!(
+                    hint.contains("Port 3000")
+                        && hint.contains("PID 11")
+                        && hint.contains("agent a"),
+                    "{hint}"
+                );
+            }
+        }
+    }
+    let home = TestHome::new("port-log");
+    let mut request = hook_request(
+        AgentKind::Codex,
+        "s2",
+        Event::PostToolUse,
+        Some("npm start"),
+    );
+    request.tool_response = Some(serde_json::json!("Port 3000 is in use"));
+    let (mut connection, receive, _cancelled) = connection();
+    connection.evidence.ports = Some(test_port_owners(&snapshot));
+    Admission::new(&[]).handle(
+        request,
+        connection,
+        &snapshot,
+        &mut HookState::default(),
+        &mut home.log(),
+        Instant::now(),
+    );
+    assert!(matches!(
+        decision(receive.try_recv().unwrap()),
+        HookDecision::Hint { .. }
+    ));
+    assert!(home.decisions().contains("\"event\":\"hint\""));
+}
+
+#[test]
+fn cached_or_unknown_port_ownership_fails_open() {
+    let snapshot = protection_snapshot();
+    let mut request = hook_request(
+        AgentKind::Codex,
+        "s2",
+        Event::PreToolUse,
+        Some("lsof -ti:3000 | xargs kill"),
+    );
+    assert!(super::protection::deny(&request, &snapshot, &HookEvidence::default()).is_none());
+    request.event = Event::PostToolUse;
+    request.tool_response = Some(serde_json::json!("Port 3000 is in use"));
+    assert!(super::protection::hint(&request, &snapshot, &HookEvidence::default()).is_none());
+    assert!(
+        super::protection::hint(
+            &request,
+            &snapshot,
+            &HookEvidence {
+                ports: Some(PortOwners::new()),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+}
+fn test_port_owners(snapshot: &Snapshot) -> PortOwners {
+    let mut owners = PortOwners::new();
+    for p in &snapshot.attribution.processes {
+        for &port in p.listening_ports.iter().flatten() {
+            owners.entry(port).or_default().insert(p.identity);
+        }
+    }
+    owners
+}
+
+fn test_evidence(snapshot: &Snapshot) -> HookEvidence {
+    HookEvidence {
+        caller: snapshot
+            .attribution
+            .agents
+            .iter()
+            .find(|a| a.id == "b")
+            .and_then(|a| a.root),
+        ports: Some(test_port_owners(snapshot)),
+        arguments: snapshot
+            .processes
+            .iter()
+            .filter_map(|p| Some((p.identity, p.argv.clone()?)))
+            .collect(),
+    }
+}
+
+#[test]
+fn name_checks_require_fresh_arguments_from_other_agents() {
+    let snapshot = protection_snapshot();
+    let request = hook_request(
+        AgentKind::Codex,
+        "s2",
+        Event::PreToolUse,
+        Some("pkill node"),
+    );
+    assert!(super::protection::deny(&request, &snapshot, &HookEvidence::default()).is_none());
+    assert!(super::protection::deny(&request, &snapshot, &test_evidence(&snapshot)).is_some());
+}
+
+#[test]
+fn ended_agent_leftovers_are_allowed_and_hints_offer_stop() {
+    let mut snapshot = protection_snapshot();
+    snapshot.attribution.agents[0].state = AgentState::Ended;
+    snapshot.attribution.processes[0].workload_id = Some("leftover".into());
+    for command in ["kill 11", "pkill node", "lsof -ti:3000 | xargs kill"] {
+        let request = hook_request(AgentKind::Codex, "s2", Event::PreToolUse, Some(command));
+        assert!(super::protection::deny(&request, &snapshot, &test_evidence(&snapshot)).is_none());
+        assert!(lookup(&request, &snapshot, None).arguments.is_empty());
+    }
+    let mut request = hook_request(
+        AgentKind::Codex,
+        "s2",
+        Event::PostToolUse,
+        Some("start server"),
+    );
+    request.tool_response = Some(serde_json::json!("Port 3000 is in use"));
+    let hint = super::protection::hint(&request, &snapshot, &test_evidence(&snapshot)).unwrap();
+    assert!(
+        hint.contains("agent ended") && hint.contains("ballast stop leftover"),
+        "{hint}"
+    );
+}
+
+#[test]
+fn socket_ancestry_survives_session_changes_and_unknown_callers_fail_open() {
+    use crate::platform::{NativePlatform, Platform};
+    use std::os::unix::net::UnixStream;
+    let platform = NativePlatform::new().unwrap();
+    let pid = std::process::id() as i32;
+    let (_, parent_pid) = platform.process_parent(pid).unwrap();
+    let (parent, _) = platform.process_parent(parent_pid).unwrap();
+    let (peer, _client) = UnixStream::pair().unwrap();
+    let peer = crate::daemon::ipc::peer_pid(&peer);
+    assert_eq!(peer, Some(pid));
+    let mut snapshot = protection_snapshot();
+    snapshot.attribution.agents[1].root = Some(parent);
+    let mut process = snapshot.processes[1].clone();
+    process.identity = parent;
+    snapshot.processes.push(process);
+    let mut attribution = snapshot.attribution.processes[1].clone();
+    attribution.identity = parent;
+    snapshot.attribution.processes.push(attribution);
+    assert!(!snapshot.processes.iter().any(|p| p.identity.pid == pid));
+    for (kind, session) in [(AgentKind::Codex, "new-thread"), (AgentKind::Claude, "s1")] {
+        for (command, denied) in [("kill 12", false), ("kill 11", true)] {
+            let request = hook_request(kind.clone(), session, Event::PreToolUse, Some(command));
+            let evidence = lookup(&request, &snapshot, peer);
+            assert_eq!(evidence.caller, Some(parent));
+            assert_eq!(
+                super::protection::deny(&request, &snapshot, &evidence).is_some(),
+                denied
+            );
+        }
+    }
+    let mut request = hook_request(AgentKind::Codex, "s2", Event::PreToolUse, Some("kill 11"));
+    assert_eq!(lookup(&request, &snapshot, None).caller, Some(parent));
+    request.session_id = "unknown".into();
+    let unknown = lookup(&request, &snapshot, None);
+    assert!(unknown.caller.is_none());
+    assert!(super::protection::deny(&request, &snapshot, &unknown).is_none());
+    // Readable, unattributed ancestry must not be overridden by a claimed known session.
+    snapshot.attribution.processes.pop();
+    request.session_id = "s2".into();
+    assert!(lookup(&request, &snapshot, peer).caller.is_none());
 }

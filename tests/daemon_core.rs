@@ -35,6 +35,7 @@ fn process(pid: i32, start_time: u64, exe: &str) -> Process {
         pgid: pid,
         uid: 501,
         stopped: false,
+        name: None,
         exe: Some(exe.into()),
         argv: None,
         metrics: None,

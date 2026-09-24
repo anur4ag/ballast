@@ -102,6 +102,12 @@ impl NativePlatform {
             pgid: number(2)? as i32,
             uid,
             stopped: matches!(fields.first().copied(), Some("T" | "t")),
+            name: contents.iter().position(|&b| b == b'(').and_then(|start| {
+                let end = contents.iter().rposition(|&b| b == b')')?;
+                std::str::from_utf8(&contents[start + 1..end])
+                    .ok()
+                    .map(str::to_owned)
+            }),
             exe: None,
             argv: None,
             metrics: resident_pages.map(|pages| ProcessMetrics {
@@ -248,6 +254,31 @@ impl Platform for NativePlatform {
         } else {
             ProcessLiveness::Unknown
         }
+    }
+
+    fn process_parent(&self, pid: i32) -> Option<(ProcessIdentity, i32)> {
+        self.stat(
+            pid,
+            &mut Vec::with_capacity(1024),
+            &mut String::with_capacity(64),
+            Instant::now(),
+            |_| false,
+        )
+        .map(|process| (process.identity, process.ppid))
+    }
+
+    fn read_arguments(&self, id: ProcessIdentity) -> Option<Vec<String>> {
+        if !self.matches(id) {
+            return None;
+        }
+        let bytes = fs::read(format!("/proc/{}/cmdline", id.pid)).ok()?;
+        let bytes = bytes.strip_suffix(&[0])?;
+        let argv = bytes
+            .split(|&b| b == 0)
+            .map(|arg| std::str::from_utf8(arg).map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        self.matches(id).then_some(argv)
     }
 
     fn read_environment(&self, id: ProcessIdentity) -> Option<Environment> {

@@ -37,6 +37,23 @@ impl Admission {
         log: &mut RotatingLog,
         now: Instant,
     ) {
+        if let Some(reason) = super::protection::deny(&request, snapshot, &connection.evidence) {
+            record(log, "deny", &request, snapshot, &reason, 0);
+            if matches!(snapshot.status.mode, Mode::Enforce) {
+                let _ = connection.reply.send(Response::new(Reply::Hook {
+                    decision: HookDecision::Deny { reason },
+                }));
+                return;
+            }
+        }
+        if let Some(context) = super::protection::hint(&request, snapshot, &connection.evidence) {
+            record(log, "hint", &request, snapshot, &context, 0);
+            state.receive(&request, now);
+            let _ = connection.reply.send(Response::new(Reply::Hook {
+                decision: HookDecision::Hint { context },
+            }));
+            return;
+        }
         let heavy = request.event == Event::PreToolUse
             && request
                 .shell_command()

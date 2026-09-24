@@ -1,10 +1,12 @@
 mod admission;
 mod classify;
+mod protection;
 mod state;
 #[cfg(test)]
 mod tests;
 pub use admission::Admission;
 pub use classify::Classifier;
+pub use protection::{HookEvidence, PortOwners, lookup};
 pub use state::HookState;
 
 use crate::daemon::{
@@ -91,6 +93,7 @@ pub enum HookDecision {
     Admit,
     Hold,
     Deny { reason: String },
+    Hint { context: String },
 }
 
 /// The caller exits the hook process after this returns, including any blocked I/O worker.
@@ -116,6 +119,7 @@ pub fn run(agent: AgentKind, timeout_seconds: u64) {
                     return Ok(());
                 };
                 let pre = request.event == Event::PreToolUse;
+                let post = request.event == Event::PostToolUse;
                 let mut client = Client::connect(&Paths::from_env()?, Duration::from_millis(50))?;
                 client.set_timeout(budget)?;
                 client.send(Method::Hook {
@@ -132,6 +136,9 @@ pub fn run(agent: AgentKind, timeout_seconds: u64) {
                         }
                         held = true;
                     } else if !pre && matches!(decision, HookDecision::Deny { .. }) {
+                        return Ok(());
+                    }
+                    if !post && matches!(decision, HookDecision::Hint { .. }) {
                         return Ok(());
                     }
                     let done = !matches!(decision, HookDecision::Hold);
@@ -159,13 +166,14 @@ pub fn run(agent: AgentKind, timeout_seconds: u64) {
         };
         decision = final_decision;
     }
-    if let HookDecision::Deny { reason } = decision {
-        let _ = writeln!(
-            io::stdout(),
-            "{}",
-            serde_json::json!({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason
-            }})
-        );
-    }
+    let output = match decision {
+        HookDecision::Deny { reason } => serde_json::json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason
+        }}),
+        HookDecision::Hint { context } => serde_json::json!({"hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": context
+        }}),
+        _ => return,
+    };
+    let _ = writeln!(io::stdout(), "{output}");
 }

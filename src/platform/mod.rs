@@ -36,6 +36,8 @@ pub struct Process {
     pub pgid: i32,
     pub uid: u32,
     pub stopped: bool,
+    #[serde(default)]
+    pub name: Option<String>,
     pub exe: Option<String>,
     pub argv: Option<Vec<String>>,
     pub metrics: Option<ProcessMetrics>,
@@ -100,7 +102,7 @@ pub trait Platform {
     /// Enumerates PIDs every scan. Watched and metric targets refresh every scan;
     /// other known processes refresh on a staggered five-second cadence.
     /// Metrics are collected only for exact selected identities, never returned from cache.
-    /// ponytail: macOS caches argv until exe changes; same-binary exec may leave argv stale.
+    /// macOS argv may stay cached until exe changes.
     fn list_processes(
         &mut self,
         watched: &HashSet<ProcessIdentity>,
@@ -108,6 +110,14 @@ pub trait Platform {
     ) -> io::Result<Vec<Process>>;
     /// None means unknown, including permission denied, truncation or identity mismatch.
     fn read_environment(&self, process: ProcessIdentity) -> Option<Environment>;
+    /// One native read of identity and parent, including processes too new for a snapshot.
+    fn process_parent(&self, _pid: i32) -> Option<(ProcessIdentity, i32)> {
+        None
+    }
+    /// Fresh arguments with identity checks before and after reading.
+    fn read_arguments(&self, _process: ProcessIdentity) -> Option<Vec<String>> {
+        None
+    }
     fn process_metrics(&self, process: ProcessIdentity) -> Option<ProcessMetrics>;
     /// PID enumeration evidence without requiring a readable process identity.
     fn pid_is_present(&self, _pid: i32) -> Option<bool> {
@@ -309,6 +319,7 @@ mod tests {
             pgid: identity.pid,
             uid: 0,
             stopped: false,
+            name: None,
             exe: None,
             argv: None,
             metrics: None,
