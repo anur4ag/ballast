@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::files::Mode;
 use crate::daemon::ipc::Response;
 use crate::platform::{Process, ProcessIdentity, ProcessMetrics};
 use ratatui::{Terminal, backend::TestBackend};
@@ -202,9 +203,11 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             "held",
             "pressure",
             "processes",
-            "status"
+            "status",
+            "today"
         ]
     );
+    ps["snapshot"].as_object_mut().unwrap().remove("today");
     ps["snapshot"].as_object_mut().unwrap().remove("held");
     ps["snapshot"].as_object_mut().unwrap().remove("guardian");
     ps["snapshot"]["pressure"]
@@ -410,4 +413,156 @@ fn narrow_and_medium_workload_rows_keep_the_handle_intact_even_with_a_long_label
         let screen = render(&s, width, 40, &mut 0);
         assert!(screen.contains("[3e325f]"), "{width}: {screen}");
     }
+}
+
+#[test]
+fn daily_summary_stays_one_line_and_observe_actions_are_conditional() {
+    let now = 60000;
+    let mut s = snapshot();
+    s.status.sampled_at_ms = now;
+    s.today = crate::report::Summary {
+        day: crate::report::day_offset(now, 0),
+        enforce: crate::report::Counts {
+            freezes: 3,
+            holds: 12,
+            median_wait_seconds: Some(40),
+            reclaimed_memory_bytes: 2254857830,
+            kills_blocked: 1,
+            ..Default::default()
+        },
+        observe: crate::report::Counts {
+            freezes: 4,
+            holds: 9,
+            kills_blocked: 2,
+            ..Default::default()
+        },
+    };
+    for width in [20, 40, 63, 80, 160] {
+        let line = report::summary(&s.today, Mode::Enforce, width, now);
+        assert!(line.chars().count() <= usize::from(width));
+        assert!(line.starts_with("today:"));
+        if width >= 80 {
+            assert!(line.contains("median 40s"));
+            assert!(line.contains("2.1 GiB reclaimed"));
+        }
+        let screen = render(&s, width, 40, &mut 0);
+        assert!(screen.contains(&line));
+        let line = report::summary(&s.today, Mode::Observe, width, now);
+        assert!(line.chars().count() <= usize::from(width));
+        if width >= 40 {
+            assert!(line.contains("would have frozen 4"));
+        }
+    }
+    let mut store = crate::report::Store::default();
+    let mut day = crate::report::Day::default();
+    day.observe.holds = 4;
+    day.observe.kills_blocked = 2;
+    store.days.insert(s.today.day.clone(), day);
+    let output = report::format(&store.report(7, now).unwrap());
+    assert!(output.to_lowercase().contains("would have"));
+    assert!(!output.contains("prevented") && !output.contains("saved"));
+    assert!(
+        report::format(&crate::report::Store::default().report(7, now).unwrap())
+            .contains("No recorded activity")
+    );
+}
+
+#[test]
+fn summary_omits_zeros_without_hiding_actions_with_unknown_memory() {
+    use crate::report::{Counts, Summary, Totals};
+    let now = 60000;
+    let mut summary = Summary {
+        day: crate::report::day_offset(now, 0),
+        ..Default::default()
+    };
+    assert_eq!(
+        report::summary(&summary, Mode::Enforce, 26, now),
+        "today: no interventions yet"
+    );
+    summary.enforce = Counts {
+        holds: 1,
+        median_wait_seconds: Some(39),
+        ..Default::default()
+    };
+    assert_eq!(
+        report::summary(&summary, Mode::Enforce, 80, now),
+        "today: 1 hold (median 39s)"
+    );
+    let totals = Totals {
+        reclaimed_processes: 2,
+        services_left_running: 1,
+        forced_resumes: 1,
+        ..Default::default()
+    };
+    summary.enforce = Counts::from(&totals);
+    assert_eq!(
+        report::summary(&summary, Mode::Enforce, 160, now),
+        "today: 2 leftovers reclaimed · 1 dev server reported · 1 forced resume"
+    );
+    summary.observe = Counts {
+        services_left_running: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        report::summary(&summary, Mode::Observe, 80, now),
+        "today: 1 dev server reported"
+    );
+    summary.day.clear();
+    assert_eq!(
+        report::summary(&summary, Mode::Enforce, 80, now),
+        "today: no interventions yet"
+    );
+    let old: Counts = serde_json::from_str(r#"{"freezes":1}"#).unwrap();
+    assert_eq!(
+        (
+            old.reclaimed_processes,
+            old.services_left_running,
+            old.forced_resumes
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn report_groups_totals_and_omits_zero_details() {
+    use crate::report::{Day, Freezes, Store};
+    let now = 60000;
+    let today = crate::report::day_offset(now, 0);
+    let mut day = Day::default();
+    day.enforce.observed_ms = 1000;
+    let mut store = Store::default();
+    store.days.insert(today.clone(), day);
+    let output = report::format(&store.report(1, now).unwrap());
+    assert!(output.starts_with(&format!("Ballast report · {today} (today)\n")));
+    assert!(output.contains("Freezes: 0\n  Heavy commands held: 0\n  No cleanups, dev-server reports, kill blocks or forced resumes."));
+    assert!(!output.contains("Wait:") && !output.contains("Memory in use"));
+    let t = &mut store.days.get_mut(&today).unwrap().enforce;
+    for kind in ["claude", "codex"] {
+        t.freezes_by_agent_kind.insert(
+            kind.into(),
+            Freezes {
+                count: 1,
+                pressure_after_30s: [("critical->elevated".into(), 1)].into(),
+                ..Default::default()
+            },
+        );
+    }
+    t.services_left_running = 1;
+    // A hold can finish today after starting yesterday.
+    t.hold_wait_seconds.insert(39, 1);
+    let output = report::format(&store.report(1, now).unwrap());
+    assert!(output.contains("Freezes: 2 (claude 1, codex 1)"));
+    assert_eq!(
+        output
+            .matches("Pressure 30 s after freeze: Critical → Elevated (1)")
+            .count(),
+        2
+    );
+    assert!(output.contains("Heavy commands held: 0\n    Wait: median 39s · worst 39s"));
+    assert!(output.contains("Leftover processes reclaimed: 0\n  Dev servers"));
+    assert!(!output.contains("Processes with unknown memory") && !output.contains("Memory in use"));
+    assert!(
+        report::format(&store.report(7, now).unwrap())
+            .contains(&format!("through {today} (local days)"))
+    );
 }

@@ -174,6 +174,7 @@ fn snapshot() -> Snapshot {
         frozen: vec![],
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 struct Harness {
@@ -221,6 +222,8 @@ impl Drop for Harness {
 #[test]
 fn grace_reclaims_batch_and_internal_then_reports_one_combined_session_summary() {
     let mut h = Harness::new(Mode::Enforce);
+    let stats = crate::report::Worker::start(h.paths.clone()).unwrap();
+    h.log.report_to(&stats);
     let mut s = snapshot();
     let mut p = Fake::default();
     let now = Instant::now();
@@ -257,6 +260,20 @@ fn grace_reclaims_batch_and_internal_then_reports_one_combined_session_summary()
     assert!(body.contains("an ended agent session"));
     assert!(body.contains("8080"));
     assert!(body.contains("ballast stop "));
+    let decisions = std::fs::read_to_string(h.paths.base.join("log/decisions.jsonl")).unwrap();
+    let service_events: Vec<serde_json::Value> = decisions
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|v| v["event"] == "service_reported")
+        .collect();
+    assert_eq!(service_events.len(), 1);
+    assert_eq!(service_events[0]["details"]["decision"]["count"], 1);
+    drop(stats);
+    let report = crate::report::read(&h.paths)
+        .unwrap()
+        .report(1, crate::daemon::unix_ms())
+        .unwrap();
+    assert_eq!(report.totals.enforce.services_left_running, 1);
 }
 
 fn two_agent_snapshot() -> Snapshot {
@@ -342,6 +359,7 @@ fn two_agent_snapshot() -> Snapshot {
         frozen: vec![],
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 

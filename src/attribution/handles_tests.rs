@@ -153,6 +153,7 @@ fn snapshot_with(workload_ids: &[&str], cleanup_pending: &[&str]) -> Snapshot {
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 

@@ -87,9 +87,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     paths.prepare()?;
     let config = Config {
         notifications: false,
+        recovery_sweep_markers: Some(Vec::new()),
         ..Config::default()
     };
+    let stats = ballast::report::Worker::start(paths.clone())?;
     let mut log = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
+    log.report_to(&stats);
     let mut platform = Owned {
         native: NativePlatform::new()?,
         children: Vec::new(),
@@ -141,6 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     };
     snapshot.attribution.owners.push(Owner {
         id: "fixture".into(),
@@ -256,6 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             guardian.batch_running(&snapshot.attribution, &snapshot.processes);
         snapshot.frozen = guardian.frozen.clone();
         snapshot.guardian = Some(guardian.note.clone());
+        snapshot.today = stats.sample(&snapshot);
         admission.tick(&snapshot, &mut hook_state, &mut log, now);
         // Keep the fixture below the next freeze while retaining Elevated pressure for holds.
         if !snapshot.frozen.is_empty() && forced.trim() == "critical" {

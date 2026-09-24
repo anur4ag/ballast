@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     };
     let published = Arc::new(RwLock::new(Arc::new(serde_json::from_value::<Snapshot>(
         serde_json::to_value(&snapshot)?,

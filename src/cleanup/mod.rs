@@ -613,6 +613,7 @@ impl Cleanup {
         self.record(log, "clean", serde_json::json!({"target": target, "process": id,
             "signal": format!("{signal:?}"), "error": result.as_ref().err().map(ToString::to_string),
             "pressure": snapshot.pressure, "sampled_at_ms": snapshot.status.sampled_at_ms,
+            "memory_bytes": snapshot.processes.iter().find(|p| p.identity == id).and_then(|p| p.metrics).map(|m| m.memory_bytes),
             "agent": agent.map(|a| serde_json::json!({"id": a.id, "state": a.state, "ended_at_ms": a.ended_at_ms})),
             "grace_seconds": self.grace.as_secs(),
             "workload": snapshot.attribution.workloads.iter().find(|w| w.id == target).map(|w|

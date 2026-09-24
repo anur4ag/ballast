@@ -112,7 +112,6 @@ impl Admission {
                 .enumerate()
                 .map(|(i, (_, queue))| queue.len().min(round + usize::from(i < index)))
                 .sum::<usize>();
-            record(log, "hold", &request, snapshot, "memory pressure", position);
             if matches!(snapshot.status.mode, Mode::Enforce) {
                 if connection
                     .reply
@@ -123,6 +122,7 @@ impl Admission {
                 {
                     return;
                 }
+                record(log, "hold", &request, snapshot, "memory pressure", position);
                 let held = Held {
                     request,
                     connection,
@@ -136,6 +136,7 @@ impl Admission {
                 }
                 return;
             }
+            record(log, "hold", &request, snapshot, "memory pressure", position);
         }
         state.receive(&request, now);
         if request.event == Event::PreToolUse {
@@ -160,7 +161,13 @@ impl Admission {
         now: Instant,
     ) {
         for (_, queue) in &mut self.queues {
-            queue.retain(|held| !held.connection.cancelled.load(Ordering::Relaxed));
+            queue.retain(|held| {
+                let cancelled = held.connection.cancelled.load(Ordering::Relaxed);
+                if cancelled {
+                    completed(log, held, snapshot, now, "cancelled");
+                }
+                !cancelled
+            });
         }
         self.queues.retain(|(_, queue)| !queue.is_empty());
         // Expired requests cannot be starved by another agent's place in the rotation.
@@ -218,6 +225,7 @@ fn admit(
     reason: &str,
 ) {
     if held.connection.cancelled.load(Ordering::Relaxed) {
+        completed(log, &held, snapshot, now, "cancelled");
         return;
     }
     if held
@@ -230,6 +238,20 @@ fn admit(
     {
         state.receive(&held.request, now);
         record(log, "admit", &held.request, snapshot, reason, 0);
+        completed(log, &held, snapshot, now, reason);
+    } else {
+        completed(log, &held, snapshot, now, "cancelled");
+    }
+}
+fn completed(log: &mut RotatingLog, held: &Held, snapshot: &Snapshot, now: Instant, reason: &str) {
+    if let Err(error) = log.decision(
+        "hold_completed",
+        serde_json::json!({
+            "mode": snapshot.status.mode, "reason": reason,
+            "wait_ms": now.saturating_duration_since(held.since).as_millis() as u64,
+        }),
+    ) {
+        eprintln!("admission decision log: {error}");
     }
 }
 fn record(

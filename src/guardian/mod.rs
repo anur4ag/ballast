@@ -490,7 +490,8 @@ impl Guardian {
                 crate::notifications::label(&victim.label)
             ),
         );
-        self.record(log, "freeze", serde_json::json!({"workload_id": victim.id}));
+        self.record(log, "freeze", serde_json::json!({"workload_id": victim.id,
+            "agent_kind": snapshot.attribution.agents.iter().find(|a| a.id == victim.agent_id).map(|a| &a.kind)}));
         if !self.episode_notified {
             let description = crate::notifications::Work::from_snapshot(snapshot, victim);
             self.episode_notified = self.notify(

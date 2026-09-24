@@ -1,3 +1,5 @@
+mod report;
+pub use report::report;
 #[cfg(test)]
 mod tests;
 mod top;

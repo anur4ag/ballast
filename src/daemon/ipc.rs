@@ -36,6 +36,7 @@ pub enum Method {
     Snapshot,
     Ps,
     Top,
+    Report { since_days: u16 },
     Resume { target: Option<String> },
     Stop { target: String },
     Gc,
@@ -50,6 +51,9 @@ pub struct Response {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
+    Report {
+        report: Box<crate::report::Report>,
+    },
     Cleanup {
         report: crate::cleanup::Report,
     },
@@ -110,6 +114,7 @@ pub(crate) fn top_snapshot(snapshot: &Snapshot) -> Snapshot {
         frozen: snapshot.frozen.clone(),
         held: snapshot.held.clone(),
         guardian: snapshot.guardian.clone(),
+        today: snapshot.today.clone(),
     }
 }
 
@@ -155,12 +160,13 @@ impl Server {
                 Ok((stream, _)) if clients.len() < 64 => {
                     let published = Arc::clone(&published);
                     let requests = requests.clone();
+                    let paths = self.paths.clone();
                     clients.push(
                         thread::Builder::new()
                             .name("ipc-client".into())
                             .stack_size(256 * 1024)
                             .spawn(move || {
-                                let _ = serve(stream, published, requests);
+                                let _ = serve(stream, published, requests, &paths);
                             })?,
                     );
                 }
@@ -268,6 +274,7 @@ fn serve(
     stream: UnixStream,
     published: Published,
     requests: SyncSender<PendingRequest>,
+    paths: &Paths,
 ) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -292,6 +299,14 @@ fn serve(
                     // Release the lock before serialization or socket writes.
                     let snapshot = Arc::clone(&published.read().unwrap());
                     Response::new(Reply::Snapshot { snapshot })
+                }
+                Method::Report { since_days } => {
+                    match crate::report::read_or_empty(paths).report(since_days, super::unix_ms()) {
+                        Ok(report) => Response::new(Reply::Report {
+                            report: Box::new(report),
+                        }),
+                        Err(e) => Response::error(e.to_string()),
+                    }
                 }
                 Method::Top => {
                     let snapshot = Arc::clone(&published.read().unwrap());

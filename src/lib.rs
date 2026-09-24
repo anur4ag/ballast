@@ -7,3 +7,4 @@ pub mod hooks;
 pub mod install;
 mod notifications;
 pub mod platform;
+pub mod report;
