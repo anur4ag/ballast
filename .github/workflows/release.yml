@@ -96,7 +96,9 @@ jobs:
           git config user.name 'Ballast releases'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Formula/ballast.rb
-          git commit -m "Release Ballast ${GITHUB_REF_NAME#v}"
+          if ! git diff --cached --quiet; then
+            git commit -m "Release Ballast ${GITHUB_REF_NAME#v}"
+          fi
           git push origin HEAD:main
       - name: Publish release
         run: gh release edit "$GITHUB_REF_NAME" --draft=false
