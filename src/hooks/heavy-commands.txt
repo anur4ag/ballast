@@ -1,0 +1,44 @@
+# Executable and literal argument prefixes, matched at shell segment boundaries.
+npm install
+npm ci
+npm test
+npm run build
+npm run test
+pnpm install
+pnpm add
+pnpm build
+pnpm test
+pnpm run build
+pnpm run test
+yarn install
+yarn add
+yarn build
+yarn test
+bun install
+bun test
+bun run build
+pip install
+pip3 install
+uv sync
+uv pip install
+cargo build
+cargo test
+cargo check
+cargo install
+rustc
+tsc
+playwright
+npx playwright
+vitest
+npx vitest
+jest
+npx jest
+pytest
+python -m pytest
+python3 -m pytest
+make
+cmake --build
+go build
+go test
+docker build
+docker compose build

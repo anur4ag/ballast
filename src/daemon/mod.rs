@@ -199,6 +199,8 @@ fn run_with_targets(
     tick_qos()?;
     let mut observer = Observer::default();
     let mut attributor = Attributor::new(config.markers.clone(), config.shells.clone());
+    let mut admission = crate::hooks::Admission::new(&config.heavy_commands);
+    let mut hook_state = crate::hooks::HookState::default();
     let mut next_tick = Instant::now();
     let mut observation_valid = false;
     loop {
@@ -280,6 +282,7 @@ fn run_with_targets(
                     frozen: Vec::new(),
                 }
             };
+            hook_state.apply(&mut next.attribution, started);
             if observation_valid {
                 cleanup.tick(started, &next, &mut guardian, &platform, &mut decisions);
             }
@@ -311,6 +314,7 @@ fn run_with_targets(
             next.status.batch_running = guardian.batch_running(&next.attribution, &next.processes);
             next.status.cleanup_pending = cleanup.pending_targets();
             next.frozen = guardian.frozen.clone();
+            admission.tick(&next, &mut hook_state, &mut decisions, started);
             {
                 let mut view = published.write().unwrap();
                 *view = Arc::new(next);
@@ -334,6 +338,30 @@ fn run_with_targets(
         match requests.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
             Ok(request) => {
                 if !request.cancelled.load(Ordering::Relaxed) {
+                    if let ipc::Method::Hook { payload } = &request.method {
+                        match serde_json::from_value::<crate::hooks::HookRequest>(payload.clone()) {
+                            Ok(hook) if !hook.session_id.is_empty() => {
+                                if hook.event == crate::hooks::Event::SessionEnd {
+                                    next_tick = Instant::now();
+                                }
+                                let snapshot = Arc::clone(&published.read().unwrap());
+                                admission.handle(
+                                    hook,
+                                    request,
+                                    &snapshot,
+                                    &mut hook_state,
+                                    &mut decisions,
+                                    Instant::now(),
+                                );
+                            }
+                            _ => {
+                                let _ = request
+                                    .reply
+                                    .send(ipc::Response::error("invalid hook request"));
+                            }
+                        }
+                        continue;
+                    }
                     let response = match request.method {
                         ipc::Method::Resume { target } => match guardian.resume(
                             target.as_deref(),
