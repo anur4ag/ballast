@@ -74,6 +74,7 @@ pub struct Config {
     pub pressure: crate::guardian::Thresholds,
     pub markers: Vec<crate::attribution::Marker>,
     pub shells: Vec<String>,
+    pub heavy_commands: Vec<String>,
     pub log_max_bytes: u64,
     pub log_rotations: usize,
 }
@@ -84,6 +85,7 @@ impl Default for Config {
             pressure: crate::guardian::Thresholds::default(),
             markers: Vec::new(),
             shells: Vec::new(),
+            heavy_commands: Vec::new(),
             log_max_bytes: 5 * 1024 * 1024,
             log_rotations: 3,
         }

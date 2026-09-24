@@ -14,6 +14,9 @@ enum Command {
     Hook {
         #[arg(value_enum)]
         agent: Agent,
+        /// Match the installed hook timeout; Ballast exits ten seconds before it.
+        #[arg(long, default_value_t = 600)]
+        timeout_seconds: u64,
     },
     Top,
     Ps,
@@ -51,8 +54,11 @@ enum DebugCommand {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ballast::daemon::warn_if_stranded();
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    if !matches!(command, Command::Hook { .. }) {
+        ballast::daemon::warn_if_stranded();
+    }
+    match command {
         Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
         Command::Resume { target, .. } => {
             let count = ballast::daemon::resume_command(
@@ -126,8 +132,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }))?
             );
         }
-        // Hook failures must not block the agent while the bridge is unimplemented.
-        Command::Hook { .. } => {}
+        Command::Hook {
+            agent,
+            timeout_seconds,
+        } => ballast::hooks::run(
+            match agent {
+                Agent::Claude => ballast::hooks::AgentKind::Claude,
+                Agent::Codex => ballast::hooks::AgentKind::Codex,
+            },
+            timeout_seconds,
+        ),
         _ => return Err("this subcommand is not implemented yet".into()),
     }
     Ok(())

@@ -50,10 +50,21 @@ pub struct Response {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
-    Resumed { count: usize },
-    Status { status: Status },
-    Snapshot { snapshot: Arc<Snapshot> },
-    Error { message: String },
+    Hook {
+        decision: crate::hooks::HookDecision,
+    },
+    Resumed {
+        count: usize,
+    },
+    Status {
+        status: Status,
+    },
+    Snapshot {
+        snapshot: Arc<Snapshot>,
+    },
+    Error {
+        message: String,
+    },
 }
 impl Response {
     pub fn new(reply: Reply) -> Self {
@@ -245,6 +256,19 @@ fn queued(
     let started = Instant::now();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(response)
+                if matches!(
+                    response.reply,
+                    Reply::Hook {
+                        decision: crate::hooks::HookDecision::Hold
+                    }
+                ) =>
+            {
+                if write_message(reader.get_ref(), &response).is_err() {
+                    cancelled.store(true, Ordering::Relaxed);
+                    return Response::error("hook disconnected");
+                }
+            }
             Ok(response) => return response,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Response::error("daemon loop unavailable");
@@ -290,7 +314,7 @@ fn read_frame(reader: &mut impl BufRead, line: &mut Vec<u8>, limit: u64) -> io::
     }
     Ok(true)
 }
-fn write_message(stream: &mut UnixStream, value: &impl Serialize) -> io::Result<()> {
+fn write_message(stream: &UnixStream, value: &impl Serialize) -> io::Result<()> {
     let mut writer = BufWriter::new(stream);
     serde_json::to_writer(&mut writer, value)?;
     writer.write_all(b"\n")?;
@@ -309,14 +333,24 @@ impl Client {
             reader: BufReader::new(stream),
         })
     }
+    pub fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.reader.get_ref().set_read_timeout(Some(timeout))?;
+        self.reader.get_ref().set_write_timeout(Some(timeout))
+    }
     pub fn request(&mut self, method: Method) -> io::Result<Response> {
+        self.send(method)?;
+        self.receive()
+    }
+    pub fn send(&mut self, method: Method) -> io::Result<()> {
         write_message(
             self.reader.get_mut(),
             &Request {
                 version: VERSION,
                 method,
             },
-        )?;
+        )
+    }
+    pub fn receive(&mut self) -> io::Result<Response> {
         let mut line = Vec::new();
         if !read_frame(&mut self.reader, &mut line, MAX_RESPONSE)? {
             return Err(io::Error::new(
