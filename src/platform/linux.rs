@@ -111,15 +111,18 @@ impl NativePlatform {
         })
     }
 
-    fn matches(&self, id: ProcessIdentity) -> bool {
+    fn read_identity(&self, pid: i32) -> Option<ProcessIdentity> {
         self.stat(
-            id.pid,
+            pid,
             &mut Vec::with_capacity(1024),
             &mut String::with_capacity(64),
             Instant::now(),
             |_| false,
         )
-        .is_some_and(|p| p.identity == id)
+        .map(|p| p.identity)
+    }
+    fn matches(&self, id: ProcessIdentity) -> bool {
+        self.read_identity(id.pid) == Some(id)
     }
 }
 
@@ -383,9 +386,7 @@ impl Platform for NativePlatform {
         }
         if self.atomic_signals {
             let fd = pidfd(id.pid)?;
-            if !self.matches(id) {
-                return Err(gone());
-            }
+            super::validate_identity(id, self.read_identity(id.pid))?;
             if unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
@@ -400,9 +401,7 @@ impl Platform for NativePlatform {
             }
         } else {
             // Old kernels lack pidfds; revalidation cannot close the final PID reuse race.
-            if !self.matches(id) {
-                return Err(gone());
-            }
+            super::validate_identity(id, self.read_identity(id.pid))?;
             if unsafe { libc::kill(id.pid, signal.raw()) } != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -411,14 +410,9 @@ impl Platform for NativePlatform {
     }
 
     fn notify(&self, title: &str, body: &str) -> io::Result<bool> {
-        match Command::new("notify-send")
-            .args(["--", title, body])
-            .status()
-        {
-            Ok(status) => Ok(status.success()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        }
+        let mut command = Command::new("notify-send");
+        command.args(["--", title, body]);
+        super::submit_notification(command)
     }
 }
 

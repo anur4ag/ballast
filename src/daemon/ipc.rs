@@ -50,6 +50,7 @@ pub struct Response {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
+    Resumed { count: usize },
     Status { status: Status },
     Snapshot { snapshot: Arc<Snapshot> },
     Error { message: String },
@@ -146,7 +147,7 @@ impl Server {
         Ok(())
     }
 }
-fn lock(paths: &Paths) -> io::Result<File> {
+pub(crate) fn lock(paths: &Paths) -> io::Result<File> {
     // ponytail: deleting/recreating the entire BALLAST_HOME changes this inode and is out of scope.
     // Lock the stable base, so replacing run/ cannot create a second owner.
     let file = OpenOptions::new()

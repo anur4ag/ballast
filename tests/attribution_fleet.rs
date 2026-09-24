@@ -582,5 +582,7 @@ fn root_fixture() {
 #[ignore]
 fn daemon_fixture() {
     let paths = Paths::from_env().expect("BALLAST_HOME must be set");
+    std::fs::write(paths.base.join("config.toml"), "mode = \"observe\"\n")
+        .expect("observe benchmark");
     ballast::daemon::run(paths).expect("daemon run");
 }

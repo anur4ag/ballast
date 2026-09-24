@@ -41,7 +41,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
     for workload in &view.workloads {
         writeln!(
             out,
-            "WORKLOAD {} agent={} class={:?} memory={}{} label={}",
+            "WORKLOAD {} agent={} class={:?} memory={}{} frozen={} label={}",
             workload.id,
             workload.agent_id.escape_default(),
             workload.class,
@@ -51,6 +51,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
             } else {
                 " (partial)"
             },
+            snapshot.frozen.iter().any(|w| w.workload_id == workload.id),
             workload.label.escape_default()
         )
         .unwrap();

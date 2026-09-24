@@ -4,6 +4,7 @@ pub mod ipc;
 mod tests;
 
 use crate::attribution::{AttributionSnapshot, Attributor};
+use crate::guardian::{FrozenWorkload, Guardian, Level, recovery};
 use crate::platform::{
     Capabilities, NativePlatform, Platform, PressureInputs, Process, ProcessIdentity,
 };
@@ -31,6 +32,10 @@ pub struct Status {
     pub tick_wall_ns: u64,
     pub sample_discarded: bool,
     pub process_count: usize,
+    #[serde(default)]
+    pub pressure_level: Level,
+    #[serde(default)]
+    pub batch_running: bool,
     pub last_error: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +47,8 @@ pub struct Snapshot {
     pub changes: ProcessChanges,
     pub pressure: Option<PressureInputs>,
     pub attribution: AttributionSnapshot,
+    #[serde(default)]
+    pub frozen: Vec<FrozenWorkload>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ProcessChanges {
@@ -132,10 +139,11 @@ fn run_with_targets(
         libc::umask(0o077);
     }
     paths.prepare()?;
-    let config = Config::load(&paths)?;
+    let loaded_config = Config::load(&paths);
+    let config = loaded_config.as_ref().cloned().unwrap_or_default();
     let server = ipc::Server::bind(paths.clone())?;
     let mut log = RotatingLog::open(paths.base.join("log/daemon.log"), &config)?;
-    let _decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
+    let mut decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
     log.write_line(&format!(
         "{} daemon {} starting",
         unix_ms(),
@@ -143,6 +151,14 @@ fn run_with_targets(
     ))?;
     let mut platform = NativePlatform::new()?;
     let boot_id = platform.boot_id()?;
+    recovery::recover(&paths, &mut platform, &config.markers, &mut decisions)?;
+    loaded_config?;
+    let mut guardian = Guardian::new(
+        paths.clone(),
+        boot_id.clone(),
+        config.mode,
+        config.pressure.clone(),
+    );
     let capabilities = platform.capabilities();
     let mut status = Status {
         daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -155,6 +171,8 @@ fn run_with_targets(
         tick_wall_ns: 0,
         sample_discarded: true,
         process_count: 0,
+        pressure_level: Level::Normal,
+        batch_running: false,
         last_error: None,
     };
     let published = Arc::new(RwLock::new(Arc::new(Snapshot {
@@ -165,6 +183,7 @@ fn run_with_targets(
         changes: ProcessChanges::default(),
         pressure: None,
         attribution: AttributionSnapshot::default(),
+        frozen: Vec::new(),
     })));
     let (send, requests) = mpsc::sync_channel(128);
     let mut socket_server = Some((server, send));
@@ -184,7 +203,9 @@ fn run_with_targets(
             status.tick_interval_ms = observer.interval().as_millis() as u64;
             status.sample_discarded = discard;
             status.last_error = None;
-            let watched = attributor.watched(&extra_watched);
+            let mut frozen_watched = guardian.watched();
+            frozen_watched.extend(&extra_watched);
+            let watched = attributor.watched(&frozen_watched);
             let mut metric_targets = attributor.metric_targets();
             metric_targets.extend(&extra_metrics);
             let observed = platform.list_processes(&watched, &metric_targets);
@@ -216,7 +237,7 @@ fn run_with_targets(
                     eprintln!("daemon log failed: {write_error}");
                 }
             }
-            let next = if let Some((mut processes, changes, pressure)) = snapshot {
+            let mut next = if let Some((mut processes, changes, pressure)) = snapshot {
                 let attribution = attributor.update(
                     &platform,
                     &mut processes,
@@ -232,6 +253,7 @@ fn run_with_targets(
                     changes,
                     pressure,
                     attribution,
+                    frozen: Vec::new(),
                 }
             } else {
                 attributor.reset_growth();
@@ -245,8 +267,35 @@ fn run_with_targets(
                     attribution: previous.attribution.clone(),
                     changes: ProcessChanges::default(),
                     pressure: None,
+                    frozen: Vec::new(),
                 }
             };
+            let result = guardian.tick(
+                started,
+                &next,
+                &mut platform,
+                &mut attributor,
+                &mut decisions,
+            );
+            let mut errors = guardian.take_errors();
+            if let Err(error) = result {
+                errors.push(error.to_string());
+            }
+            for error in errors {
+                next.status
+                    .last_error
+                    .get_or_insert_with(|| format!("guardian: {error}"));
+                if let Err(write_error) =
+                    log.write_line(&format!("{} guardian: {error}", unix_ms()))
+                {
+                    eprintln!("guardian: {error}; daemon log failed: {write_error}");
+                }
+            }
+            observer.set_fast_polling(guardian.level != Level::Normal);
+            next.status.tick_interval_ms = observer.interval().as_millis() as u64;
+            next.status.pressure_level = guardian.level;
+            next.status.batch_running = guardian.batch_running(&next.attribution, &next.processes);
+            next.frozen = guardian.frozen.clone();
             {
                 let mut view = published.write().unwrap();
                 *view = Arc::new(next);
@@ -270,10 +319,22 @@ fn run_with_targets(
         match requests.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
             Ok(request) => {
                 if !request.cancelled.load(Ordering::Relaxed) {
-                    // Guardian, cleanup and hook tickets supply these loop-owned handlers.
-                    let _ = request
-                        .reply
-                        .send(ipc::Response::error("request is not implemented yet"));
+                    let response = match request.method {
+                        ipc::Method::Resume { target } => match guardian.resume(
+                            target.as_deref(),
+                            Instant::now(),
+                            &platform,
+                            &mut decisions,
+                        ) {
+                            Ok(count) => {
+                                next_tick = Instant::now();
+                                ipc::Response::new(ipc::Reply::Resumed { count })
+                            }
+                            Err(e) => ipc::Response::error(e.to_string()),
+                        },
+                        _ => ipc::Response::error("request is not implemented yet"),
+                    };
+                    let _ = request.reply.send(response);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -352,4 +413,58 @@ fn start_watchdog(heartbeat: Arc<AtomicU64>) -> io::Result<()> {
             }
         })?;
     Ok(())
+}
+
+pub fn warn_if_stranded() {
+    let Ok(paths) = Paths::from_env() else {
+        return;
+    };
+    if recovery::needs_recovery(&paths)
+        && ipc::Client::connect(&paths, Duration::from_millis(250))
+            .and_then(|mut client| client.request(ipc::Method::Status))
+            .is_err()
+    {
+        eprintln!(
+            "WARNING: Ballast has frozen work and the daemon is unreachable. Run `ballast resume --all` to recover it."
+        );
+    }
+}
+
+pub fn resume_command(paths: &Paths, target: Option<&str>) -> io::Result<usize> {
+    if let Ok(mut client) = ipc::Client::connect(paths, Duration::from_secs(1)) {
+        if let Ok(response) = client.request(ipc::Method::Resume {
+            target: target.map(str::to_owned),
+        }) {
+            return match response.reply {
+                ipc::Reply::Resumed { count } => Ok(count),
+                ipc::Reply::Error { message } => Err(io::Error::other(message)),
+                _ => Err(io::Error::other("unexpected resume response")),
+            };
+        }
+    }
+    // The directory lock arbitrates a concurrent or slow daemon.
+    paths.prepare()?;
+    let _lock = ipc::lock(paths)?;
+    let config = Config::load(paths).unwrap_or_default();
+    let mut platform = NativePlatform::new()?;
+    let mut log = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
+    if target.is_none() {
+        return recovery::recover(paths, &mut platform, &config.markers, &mut log);
+    }
+    let boot_id = platform.boot_id()?;
+    let saved = recovery::read(paths)?;
+    let mut guardian = Guardian::new(
+        paths.clone(),
+        boot_id.clone(),
+        Mode::Enforce,
+        config.pressure,
+    );
+    if saved.boot_id == boot_id {
+        guardian.frozen = saved.workloads;
+    }
+    let result = guardian.resume(target, Instant::now(), &platform, &mut log);
+    for error in guardian.take_errors() {
+        eprintln!("guardian: {error}");
+    }
+    result
 }

@@ -71,6 +71,7 @@ pub enum Mode {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mode: Mode,
+    pub pressure: crate::guardian::Thresholds,
     pub markers: Vec<crate::attribution::Marker>,
     pub shells: Vec<String>,
     pub log_max_bytes: u64,
@@ -80,6 +81,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Enforce,
+            pressure: crate::guardian::Thresholds::default(),
             markers: Vec::new(),
             shells: Vec::new(),
             log_max_bytes: 5 * 1024 * 1024,
@@ -96,6 +98,12 @@ impl Config {
         };
         let config: Self = toml::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("config.toml: {e}")))?;
+        if !config.pressure.valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pressure thresholds must be finite, positive, ordered, and PSI percentages at most 100",
+            ));
+        }
         if config.log_max_bytes == 0 || !(1..=10).contains(&config.log_rotations) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -359,9 +359,7 @@ impl Platform for NativePlatform {
 
     fn send_signal(&self, id: ProcessIdentity, signal: Signal) -> io::Result<()> {
         // macOS has no pidfd: immediate revalidation leaves a small exit/PID-reuse race.
-        if !Self::matches(id) {
-            return Err(gone());
-        }
+        super::validate_identity(id, Self::bsd(id.pid).map(|info| identity(&info)))?;
         if unsafe { libc::kill(id.pid, signal.raw()) } != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -370,10 +368,9 @@ impl Platform for NativePlatform {
 
     fn notify(&self, title: &str, body: &str) -> io::Result<bool> {
         let script = "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run";
-        Ok(Command::new("/usr/bin/osascript")
-            .args(["-e", script, "--", title, body])
-            .status()?
-            .success())
+        let mut command = Command::new("/usr/bin/osascript");
+        command.args(["-e", script, "--", title, body]);
+        super::submit_notification(command)
     }
 }
 

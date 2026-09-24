@@ -140,9 +140,44 @@ pub trait Platform {
             .collect()
     }
     /// Rejects invalid PIDs and changed identities before signalling.
+    /// NotFound means a confirmed exit or identity mismatch; unreadable identities use another error kind.
     fn send_signal(&self, process: ProcessIdentity, signal: Signal) -> io::Result<()>;
+    /// True means submitted, not necessarily displayed. Delivery must not block the tick loop.
     /// False means unavailable; the caller should keep the message in its log/UI.
     fn notify(&self, title: &str, body: &str) -> io::Result<bool>;
+}
+
+// Notification helpers may wait for a desktop bus. Reap them off the tick thread,
+// with a deadline so a missing desktop cannot accumulate stuck children.
+fn submit_notification(mut command: std::process::Command) -> io::Result<bool> {
+    use std::process::Stdio;
+    let mut child = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
+    });
+    Ok(true)
 }
 
 // ponytail: unwatched PID reuse/state changes can lag five seconds plus one scan.
@@ -184,6 +219,29 @@ fn gone() -> io::Error {
         io::ErrorKind::NotFound,
         "process identity no longer matches",
     )
+}
+
+/// An unreadable identity is not proof of exit; preserve recovery evidence while the PID exists.
+pub(crate) fn validate_identity(
+    expected: ProcessIdentity,
+    actual: Option<ProcessIdentity>,
+) -> io::Result<()> {
+    if expected.pid <= 0 {
+        return Err(gone());
+    }
+    match actual {
+        Some(id) if id == expected => Ok(()),
+        Some(_) => Err(gone()),
+        None => {
+            if unsafe { libc::kill(expected.pid, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                Err(gone())
+            } else {
+                Err(io::Error::other("process identity unreadable"))
+            }
+        }
+    }
 }
 
 fn parse_environment(bytes: &[u8]) -> Option<Environment> {

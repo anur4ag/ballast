@@ -51,8 +51,16 @@ enum DebugCommand {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ballast::daemon::warn_if_stranded();
     match Cli::parse().command {
         Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
+        Command::Resume { target, .. } => {
+            let count = ballast::daemon::resume_command(
+                &ballast::daemon::files::Paths::from_env()?,
+                target.as_deref(),
+            )?;
+            println!("Resumed {count} frozen entries.");
+        }
         Command::Ps => {
             use ballast::daemon::{
                 files::Paths,
@@ -89,6 +97,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     status.tick_wall_ns as f64 / 1_000_000.0,
                     status.tick_interval_ms,
                     status.process_count
+                );
+                println!(
+                    "Pressure: {:?}; agent batch running: {}",
+                    status.pressure_level, status.batch_running
                 );
                 if let Some(error) = &status.last_error {
                     println!("Last observation failed: {error}");
