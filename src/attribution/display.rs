@@ -42,7 +42,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
         writeln!(
             out,
             "WORKLOAD {} agent={} class={:?} memory={}{} frozen={} label={}",
-            workload.id,
+            workload.id.escape_default(),
             workload.agent_id.escape_default(),
             workload.class,
             workload.memory.bytes,
@@ -63,7 +63,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
         let a = assignments.get(&p.identity);
         writeln!(
             out,
-            "PROCESS {} start={} ppid={} pgid={} agent={} workload={} role={:?} memory={} exe={}",
+            "PROCESS {} start={} ppid={} pgid={} agent={} workload={} role={:?} memory={} cpu_ns={} exe={}",
             p.identity.pid,
             p.identity.start_time,
             p.ppid,
@@ -71,14 +71,54 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
             a.and_then(|a| a.agent_id.as_deref())
                 .unwrap_or("-")
                 .escape_default(),
-            a.and_then(|a| a.workload_id.as_deref()).unwrap_or("-"),
+            a.and_then(|a| a.workload_id.as_deref()).unwrap_or("-").escape_default(),
             a.map_or(ProcessRole::Unattributed, |a| a.role),
             p.metrics
                 .map(|m| m.memory_bytes.to_string())
                 .unwrap_or_else(|| "?".into()),
+            p.metrics.map(|m| m.cpu_time_ns.to_string()).unwrap_or_else(|| "?".into()),
             p.exe.as_deref().unwrap_or("?").escape_default()
         )
         .unwrap();
+    }
+    for frozen in &snapshot.frozen {
+        writeln!(
+            out,
+            "FROZEN {} since_ms={} duration_ms={} mode={:?} reason=guardian_memory_pressure",
+            frozen.workload_id.escape_default(),
+            frozen.frozen_at_ms,
+            snapshot
+                .status
+                .sampled_at_ms
+                .saturating_sub(frozen.frozen_at_ms),
+            snapshot.status.mode
+        )
+        .unwrap();
+    }
+    for held in &snapshot.held {
+        writeln!(
+            out,
+            "HELD agent={} session={} since_ms={} wait_ms={} reason={} label={}",
+            held.agent.escape_default(),
+            held.session_id.escape_default(),
+            held.since_ms,
+            snapshot.status.sampled_at_ms.saturating_sub(held.since_ms),
+            held.reason.escape_default(),
+            held.label.escape_default()
+        )
+        .unwrap();
+    }
+    if let Some(note) = &snapshot.guardian {
+        writeln!(
+            out,
+            "GUARDIAN kind={} message={}",
+            note.kind.escape_default(),
+            note.message.escape_default()
+        )
+        .unwrap();
+    }
+    for id in &snapshot.status.cleanup_pending {
+        writeln!(out, "CLEANUP_PENDING {}", id.escape_default()).unwrap();
     }
     out
 }

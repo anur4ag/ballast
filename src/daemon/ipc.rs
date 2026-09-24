@@ -83,6 +83,36 @@ impl Response {
     }
 }
 
+/// The live UI needs fleet metrics, not machine-wide executable/argument data.
+pub(crate) fn top_snapshot(snapshot: &Snapshot) -> Snapshot {
+    let mut attribution = snapshot.attribution.clone();
+    attribution.processes.retain(|p| p.agent_id.is_some());
+    let identities: std::collections::HashSet<_> =
+        attribution.processes.iter().map(|p| p.identity).collect();
+    Snapshot {
+        status: snapshot.status.clone(),
+        boot_id: snapshot.boot_id.clone(),
+        capabilities: snapshot.capabilities,
+        processes: snapshot
+            .processes
+            .iter()
+            .filter(|p| identities.contains(&p.identity))
+            .map(|p| {
+                let mut p = p.clone();
+                p.argv = None;
+                p.exe = None;
+                p
+            })
+            .collect(),
+        changes: super::ProcessChanges::default(),
+        pressure: snapshot.pressure.clone(),
+        attribution,
+        frozen: snapshot.frozen.clone(),
+        held: snapshot.held.clone(),
+        guardian: snapshot.guardian.clone(),
+    }
+}
+
 /// The loop can retain the reply sender for admission without blocking itself.
 pub struct PendingRequest {
     pub method: Method,
@@ -228,10 +258,16 @@ fn serve(
                 Method::Status => Response::new(Reply::Status {
                     status: published.read().unwrap().status.clone(),
                 }),
-                Method::Snapshot | Method::Ps | Method::Top => {
+                Method::Snapshot | Method::Ps => {
                     // Release the lock before serialization or socket writes.
                     let snapshot = Arc::clone(&published.read().unwrap());
                     Response::new(Reply::Snapshot { snapshot })
+                }
+                Method::Top => {
+                    let snapshot = Arc::clone(&published.read().unwrap());
+                    Response::new(Reply::Snapshot {
+                        snapshot: Arc::new(top_snapshot(&snapshot)),
+                    })
                 }
                 method => queued(method, &reader, &requests),
             },

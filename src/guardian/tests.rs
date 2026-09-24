@@ -306,6 +306,8 @@ fn snapshot(
         pressure,
         attribution,
         frozen: Vec::new(),
+        held: Vec::new(),
+        guardian: None,
     }
 }
 
@@ -732,6 +734,9 @@ fn critical_freeze_stands_down_when_pressure_is_not_agents_fault() {
         guardian.frozen.is_empty(),
         "must not freeze when pressure is not agents' fault"
     );
+    assert_eq!(guardian.note.kind, "non_agent_pressure");
+    assert_eq!(guardian.note.agent_memory_share, Some(0.125));
+    assert!(guardian.note.message.contains("non-agent apps"));
     assert!(platform.stopped().is_empty());
     assert!(
         platform

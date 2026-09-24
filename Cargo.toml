@@ -7,7 +7,9 @@ description = "Keep your machine responsive while coding agents work"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
 libc = "0.2"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }

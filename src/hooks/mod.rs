@@ -3,7 +3,7 @@ mod classify;
 mod state;
 #[cfg(test)]
 mod tests;
-pub use admission::Admission;
+pub use admission::{Admission, HeldCommand};
 pub use classify::Classifier;
 pub use state::HookState;
 

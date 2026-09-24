@@ -165,6 +165,8 @@ fn snapshot() -> Snapshot {
         changes: ProcessChanges::default(),
         pressure: None,
         frozen: vec![],
+        held: Vec::new(),
+        guardian: None,
     }
 }
 struct Harness {

@@ -434,7 +434,8 @@ fn a_stale_journal_entry_whose_identity_no_longer_matches_is_never_signalled() {
 fn cli_offline_resume_recovers_directly_when_no_daemon_is_reachable() {
     let home = TempHome::new("cli-offline");
     let boot = current_boot_id();
-    let owned = OwnedSleep::spawn("cli-offline");
+    // Journal recovery is sufficient; avoid parallel startup marker sweeps resuming this child.
+    let owned = BareSleep::spawn();
     owned.stop();
     home.write_frozen_json(
         &boot,
@@ -443,6 +444,24 @@ fn cli_offline_resume_recovers_directly_when_no_daemon_is_reachable() {
             identity_of(owned.pid()),
         )],
     );
+
+    for args in [
+        &["--help"][..],
+        &["--version"],
+        &["status", "--json"],
+        &["ps", "--json"],
+        &["top"],
+    ] {
+        let output = run_cli(&home.path, args);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ballast resume --all"),
+            "{args:?}"
+        );
+        assert!(
+            is_stopped(owned.pid()),
+            "read-only commands must not signal the frozen child"
+        );
+    }
 
     let output = run_cli(&home.path, &["resume", "--all"]);
     assert!(

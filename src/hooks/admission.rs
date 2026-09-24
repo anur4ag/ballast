@@ -9,6 +9,15 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HeldCommand {
+    pub agent: String,
+    pub session_id: String,
+    pub label: String,
+    pub reason: String,
+    pub since_ms: u64,
+}
+
 struct Held {
     request: HookRequest,
     connection: PendingRequest,
@@ -27,6 +36,32 @@ impl Admission {
             queues: VecDeque::new(),
             last_admit: None,
         }
+    }
+    /// Read-only view in round-robin admission order.
+    pub fn held(&self) -> Vec<HeldCommand> {
+        let mut result = Vec::new();
+        let rounds = self.queues.iter().map(|(_, q)| q.len()).max().unwrap_or(0);
+        for round in 0..rounds {
+            for (_, queue) in &self.queues {
+                if let Some(held) = queue.get(round) {
+                    if held.connection.cancelled.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    result.push(HeldCommand {
+                        agent: held.request.agent.as_str().into(),
+                        session_id: held.request.session_id.clone(),
+                        label: held.request.shell_command().unwrap_or("").into(),
+                        reason: "memory pressure; waiting for admission".into(),
+                        since_ms: held
+                            .wall
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    });
+                }
+            }
+        }
+        result
     }
     pub fn handle(
         &mut self,

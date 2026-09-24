@@ -172,6 +172,17 @@ impl PressureState {
     }
 }
 
+/// Current policy explanation and the exact pressure rates used by the guardian.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GuardianNote {
+    pub kind: String,
+    pub message: String,
+    pub sampled_at_ms: u64,
+    pub agent_memory_share: Option<f64>,
+    pub pageout_mib_per_sec: Option<f64>,
+    pub swapout_mib_per_sec: Option<f64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrozenWorkload {
     pub workload_id: String,
@@ -196,6 +207,7 @@ impl FrozenWorkload {
 pub struct Guardian {
     pub level: Level,
     pub frozen: Vec<FrozenWorkload>,
+    pub note: GuardianNote,
     paths: Paths,
     boot_id: String,
     mode: Mode,
@@ -216,6 +228,7 @@ impl Guardian {
         Self {
             level: Level::Normal,
             frozen: Vec::new(),
+            note: GuardianNote::default(),
             paths,
             boot_id,
             mode,
@@ -299,6 +312,14 @@ impl Guardian {
             self.level = Level::Normal;
             self.pressure.level = Level::Normal;
         }
+        self.note = GuardianNote {
+            kind: "monitoring".into(),
+            message: "Monitoring memory pressure.".into(),
+            sampled_at_ms: snapshot.status.sampled_at_ms,
+            pageout_mib_per_sec: self.pressure.pageout_mib_per_sec,
+            swapout_mib_per_sec: self.pressure.swapout_mib_per_sec,
+            ..GuardianNote::default()
+        };
         let workloads: Vec<_> = snapshot.attribution.workloads.iter().map(|w| serde_json::json!({
             "id": w.id, "root": w.root, "class": w.class, "memory": w.memory, "first_seen_ms": w.first_seen_ms,
         })).collect();
@@ -328,9 +349,17 @@ impl Guardian {
             self.resume_one(&id, true, "max_freeze", now, platform, log)?;
         }
         if !self.pressure.valid && !pressure_unknown {
+            self.explain(
+                "unknown_pressure",
+                "Pressure sample unavailable; no new freezes.",
+            );
             return Ok(());
         }
         if self.level == Level::Normal {
+            self.explain(
+                "normal",
+                "No new holds or freezes; paused work resumes in order.",
+            );
             self.last_stand_down = None;
             if self
                 .last_resume
@@ -347,11 +376,21 @@ impl Guardian {
             }
             return Ok(());
         }
-        if self.level != Level::Critical
-            || self
-                .last_freeze
-                .is_some_and(|then| now.saturating_duration_since(then) < COOLDOWN)
+        if self.level != Level::Critical {
+            self.explain(
+                "elevated",
+                "Heavy commands may wait; running work continues.",
+            );
+            return Ok(());
+        }
+        if self
+            .last_freeze
+            .is_some_and(|then| now.saturating_duration_since(then) < COOLDOWN)
         {
+            self.explain(
+                "cooldown",
+                "Waiting five seconds before another freeze decision.",
+            );
             return Ok(());
         }
         let attributed: u128 = snapshot
@@ -360,12 +399,11 @@ impl Guardian {
             .iter()
             .map(|a| u128::from(a.memory.bytes))
             .sum();
-        if snapshot
-            .pressure
-            .as_ref()
-            .and_then(|p| p.used_memory_bytes)
-            .is_none_or(|used| used == 0 || attributed * 10 < u128::from(used) * 3)
-        {
+        let used = snapshot.pressure.as_ref().and_then(|p| p.used_memory_bytes);
+        self.note.agent_memory_share = used
+            .filter(|used| *used > 0)
+            .map(|used| attributed as f64 / used as f64);
+        if used.is_none_or(|used| used == 0 || attributed * 10 < u128::from(used) * 3) {
             self.stand_down("non_agent_pressure", log)?;
             self.notify(
                 "non_agent_pressure",
@@ -412,6 +450,10 @@ impl Guardian {
         self.last_stand_down = None;
         self.last_freeze = Some(now);
         if let Err(error) = self.freeze(victim, snapshot, now, platform, attributor) {
+            self.explain(
+                "freeze_failed",
+                "Could not freeze workload; check last error.",
+            );
             self.record(
                 log,
                 "freeze_failed",
@@ -419,6 +461,18 @@ impl Guardian {
             );
             return Err(error);
         }
+        self.explain(
+            "froze",
+            &format!(
+                "{} {} to relieve memory pressure.",
+                if matches!(self.mode, Mode::Observe) {
+                    "Would pause"
+                } else {
+                    "Paused"
+                },
+                victim.id
+            ),
+        );
         self.record(log, "freeze", serde_json::json!({"workload_id": victim.id}));
         self.notify(
             "freeze",
@@ -429,7 +483,20 @@ impl Guardian {
         );
         Ok(())
     }
+    fn explain(&mut self, kind: &str, message: &str) {
+        self.note.kind = kind.into();
+        self.note.message = message.into();
+    }
     fn stand_down(&mut self, reason: &'static str, log: &mut RotatingLog) -> io::Result<()> {
+        let message = match reason {
+            "non_agent_pressure" if self.note.agent_memory_share.is_some() => {
+                "Memory pressure is coming from non-agent apps; no new freeze."
+            }
+            "non_agent_pressure" => "Agent memory share unknown; no new freeze.",
+            "last_batch_not_fastest" => "Last batch lacks fastest-growth evidence; no new freeze.",
+            _ => "No eligible workload to freeze.",
+        };
+        self.explain(reason, message);
         if self.last_stand_down != Some(reason) {
             self.record(log, "freeze_skipped", serde_json::json!({"reason": reason}));
             self.last_stand_down = Some(reason);
@@ -593,6 +660,7 @@ impl Guardian {
         if forced {
             self.ineligible.insert(id.to_owned(), now + INELIGIBLE);
         }
+        self.explain("resumed", &format!("Resumed {id} ({reason})."));
         self.decision(log, "resume", serde_json::json!({"mode": self.mode, "level": self.level, "workload": workload, "reason": reason, "evidence": self.evidence}));
         if forced {
             self.notify(
