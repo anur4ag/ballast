@@ -17,7 +17,7 @@ repo = os.environ["GITHUB_REPOSITORY"]
 base = f"https://github.com/{repo}/releases/download/v{version}"
 formula = ['class Ballast < Formula', '  desc "Keep your machine responsive while coding agents work"',
            f'  homepage "https://github.com/{repo}"', f'  version "{version}"',
-           '  license any_of: ["MIT", "Apache-2.0"]', '  depends_on :macos', '  depends_on macos: :big_sur', '']
+           '  license any_of: ["MIT", "Apache-2.0"]', '  depends_on macos: :big_sur', '']
 for architecture, target in [("arm", "aarch64-apple-darwin"), ("intel", "x86_64-apple-darwin")]:
     name = f"ballast-{version}-{target}.tar.gz"
     digest = hashlib.sha256((dist / name).read_bytes()).hexdigest()
