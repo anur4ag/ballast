@@ -42,6 +42,8 @@ pub struct Status {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub today: crate::report::Summary,
     pub status: Status,
     pub boot_id: String,
     pub capabilities: Capabilities,
@@ -172,6 +174,8 @@ fn run_with_targets(
     .inspect_err(|error: &io::Error| {
         let _ = log.write_line(&format!("{} daemon startup failed: {error}", unix_ms()));
     })?;
+    let stats = crate::report::Worker::start(paths.clone())?;
+    decisions.report_to(&stats);
     let mut guardian = Guardian::new(
         paths.clone(),
         boot_id.clone(),
@@ -210,6 +214,7 @@ fn run_with_targets(
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     })));
     let (send, requests) = mpsc::sync_channel(128);
     let mut socket_server = Some((server, send));
@@ -287,6 +292,7 @@ fn run_with_targets(
                     frozen: Vec::new(),
                     held: Vec::new(),
                     guardian: None,
+                    today: Default::default(),
                 }
             } else {
                 attributor.reset_growth();
@@ -303,6 +309,7 @@ fn run_with_targets(
                     frozen: Vec::new(),
                     held: Vec::new(),
                     guardian: None,
+                    today: Default::default(),
                 }
             };
             hook_state.apply(&mut next.attribution, started);
@@ -340,6 +347,7 @@ fn run_with_targets(
             admission.tick(&next, &mut hook_state, &mut decisions, started);
             next.held = admission.held();
             next.guardian = Some(guardian.note.clone());
+            next.today = stats.sample(&next);
             {
                 let mut view = published.write().unwrap();
                 *view = Arc::new(next);

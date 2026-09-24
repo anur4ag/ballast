@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::files::Mode;
 use crate::daemon::ipc::Response;
 use crate::platform::{Process, ProcessIdentity, ProcessMetrics};
 use ratatui::{Terminal, backend::TestBackend};
@@ -171,9 +172,11 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             "held",
             "pressure",
             "processes",
-            "status"
+            "status",
+            "today"
         ]
     );
+    ps["snapshot"].as_object_mut().unwrap().remove("today");
     ps["snapshot"].as_object_mut().unwrap().remove("held");
     ps["snapshot"].as_object_mut().unwrap().remove("guardian");
     ps["snapshot"]["pressure"]
@@ -360,4 +363,55 @@ fn fleet_tree_columns_and_optional_section_gaps() {
         .find(|line| line.starts_with("q quit"))
         .unwrap();
     assert_eq!(help, "q quit · j/k scroll · PgUp/PgDn");
+}
+
+#[test]
+fn daily_summary_stays_one_line_and_observe_actions_are_conditional() {
+    let now = 60000;
+    let mut s = snapshot();
+    s.status.sampled_at_ms = now;
+    s.today = crate::report::Summary {
+        day: crate::report::day_offset(now, 0),
+        enforce: crate::report::Counts {
+            freezes: 3,
+            holds: 12,
+            median_wait_seconds: Some(40),
+            reclaimed_memory_bytes: 2254857830,
+            kills_blocked: 1,
+        },
+        observe: crate::report::Counts {
+            freezes: 4,
+            holds: 9,
+            kills_blocked: 2,
+            ..Default::default()
+        },
+    };
+    for width in [20, 40, 63, 80, 160] {
+        let line = report::summary(&s.today, Mode::Enforce, width, now);
+        assert!(line.chars().count() <= usize::from(width));
+        assert!(line.starts_with("today:"));
+        if width >= 80 {
+            assert!(line.contains("median 40s"));
+            assert!(line.contains("2.1 GiB reclaimed"));
+        }
+        let screen = render(&s, width, 40, &mut 0);
+        assert!(screen.contains(&line));
+        let line = report::summary(&s.today, Mode::Observe, width, now);
+        assert!(line.chars().count() <= usize::from(width));
+        if width >= 40 {
+            assert!(line.contains("would have frozen 4"));
+        }
+    }
+    let mut store = crate::report::Store::default();
+    let mut day = crate::report::Day::default();
+    day.observe.holds = 4;
+    day.observe.kills_blocked = 2;
+    store.days.insert(s.today.day.clone(), day);
+    let output = report::format(&store.report(7, now).unwrap());
+    assert!(output.contains("would have"));
+    assert!(!output.contains("prevented") && !output.contains("saved"));
+    assert!(
+        report::format(&crate::report::Store::default().report(7, now).unwrap())
+            .contains("No recorded activity")
+    );
 }

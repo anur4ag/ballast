@@ -159,6 +159,7 @@ pub struct RotatingLog {
     size: u64,
     max_bytes: u64,
     rotations: usize,
+    stats: Option<std::sync::mpsc::Sender<crate::report::Message>>,
 }
 impl RotatingLog {
     pub fn open(path: PathBuf, config: &Config) -> io::Result<Self> {
@@ -169,6 +170,7 @@ impl RotatingLog {
             path,
             max_bytes: config.log_max_bytes,
             rotations: config.log_rotations,
+            stats: None,
         })
     }
     pub fn write_line(&mut self, line: &str) -> io::Result<()> {
@@ -205,9 +207,33 @@ impl RotatingLog {
         path.push(format!(".{index}"));
         PathBuf::from(path)
     }
+    pub fn report_to(&mut self, worker: &crate::report::Worker) {
+        self.stats = Some(worker.send.clone());
+    }
     pub fn decision(&mut self, event: &str, details: serde_json::Value) -> io::Result<()> {
-        self.write_line(&serde_json::to_string(&serde_json::json!({
-            "timestamp_ms": super::unix_ms(), "event": event, "details": details,
-        }))?)
+        let at = super::unix_ms();
+        let result = self.write_line(&serde_json::to_string(&serde_json::json!({
+            "timestamp_ms": at, "event": event, "details": details,
+        }))?);
+        if matches!(
+            event,
+            "freeze"
+                | "resume"
+                | "hold"
+                | "hold_completed"
+                | "deny"
+                | "service_reported"
+                | "clean"
+                | "clean_reclaimed"
+        ) {
+            if let Some(stats) = &self.stats {
+                let _ = stats.send(crate::report::Message::Decision {
+                    at,
+                    event: event.into(),
+                    details,
+                });
+            }
+        }
+        result
     }
 }

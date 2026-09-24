@@ -414,6 +414,10 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
             CRITICAL,
         )));
     }
+    let summary = super::report::summary(&s.today, s.status.mode, width, now);
+    if !summary.is_empty() {
+        header.push(Line::from(summary));
+    }
     View {
         header,
         lines: lines(s, cpu, width, now),

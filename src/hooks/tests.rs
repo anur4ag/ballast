@@ -119,6 +119,7 @@ fn snapshot_with(
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 
@@ -706,6 +707,14 @@ fn tick_expires_max_hold_after_five_minutes_regardless_of_pressure() {
         .expect("must admit once the 300s max-hold ceiling is reached");
     assert_eq!(decision(response), HookDecision::Admit);
     assert!(home.decisions().contains("max hold"));
+    let completed: serde_json::Value = home
+        .decisions()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|v| v["event"] == "hold_completed")
+        .unwrap();
+    assert_eq!(completed["details"]["wait_ms"], 300000);
+    assert_eq!(completed["details"]["reason"], "max hold");
 }
 
 #[test]

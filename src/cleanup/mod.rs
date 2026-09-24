@@ -42,6 +42,7 @@ pub struct Cleanup {
     grace: Duration,
     pending: HashMap<String, Termination>,
     reported_services: HashSet<String>,
+    counted_services: HashSet<String>,
     reclaimed: Vec<String>,
     last_notification: HashMap<&'static str, Instant>,
     errors: Vec<String>,
@@ -53,6 +54,7 @@ impl Cleanup {
             grace,
             pending: HashMap::new(),
             reported_services: HashSet::new(),
+            counted_services: HashSet::new(),
             reclaimed: Vec::new(),
             last_notification: HashMap::new(),
             errors: Vec::new(),
@@ -251,6 +253,20 @@ impl Cleanup {
                 self.schedule(key.clone(), agent.id.clone(), None, true);
                 report.scheduled.push(key);
             }
+        }
+        self.counted_services
+            .retain(|id| snapshot.attribution.workloads.iter().any(|w| &w.id == id));
+        let newly_reported = report
+            .services
+            .iter()
+            .filter(|s| self.counted_services.insert(s.workload_id.clone()))
+            .count();
+        if newly_reported > 0 {
+            self.record(
+                log,
+                "service_reported",
+                serde_json::json!({"count": newly_reported}),
+            );
         }
         let new: Vec<_> = report
             .services
@@ -456,6 +472,7 @@ impl Cleanup {
         self.record(log, "clean", serde_json::json!({"target": target, "process": id,
             "signal": format!("{signal:?}"), "error": result.as_ref().err().map(ToString::to_string),
             "pressure": snapshot.pressure, "sampled_at_ms": snapshot.status.sampled_at_ms,
+            "memory_bytes": snapshot.processes.iter().find(|p| p.identity == id).and_then(|p| p.metrics).map(|m| m.memory_bytes),
             "agent": agent.map(|a| serde_json::json!({"id": a.id, "state": a.state, "ended_at_ms": a.ended_at_ms})),
             "grace_seconds": self.grace.as_secs(),
             "workload": snapshot.attribution.workloads.iter().find(|w| w.id == target).map(|w|

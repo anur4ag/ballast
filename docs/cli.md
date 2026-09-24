@@ -115,3 +115,71 @@ python3 spikes/verify_top.py
 This uses tmux, a temporary Ballast home, production IPC/admission/guardian code, synthetic pressure, and three test-owned sleep processes.
 It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/t09` directory, then verifies admission and resume after pressure returns to Normal.
 The fixture accepts `exit` in its pressure file, thaws on normal exit, and also exits after 150 seconds.
+
+## Effectiveness report
+
+`ballast report [--since 1d|7d|30d|90d] [--json]` reports recorded facts over local calendar days, including today.
+The default is `7d`, today plus the six previous local days.
+It reads through the running daemon, or directly from `state/stats.json` when disconnected.
+Missing or corrupt data produces an empty report; corruption also prints a diagnostic on stderr.
+The read-only command does not recover, signal, or modify state.
+
+The daemon keeps the latest 90 local days independently of rotated decision logs.
+A worker consumes decision evidence and sampling intervals, atomically replaces a private `stats.json`, and syncs the file and containing directory.
+Writes are outside the sampling thread; the report and top summary can lag a tick while a write is pending.
+An abrupt exit can lose queued, not-yet-persisted updates.
+Only aggregates are persisted, with no process identities, session IDs, commands, paths, arguments or environment contents.
+
+Enforce outcomes and observe proposals are separate.
+Observe freezes, holds and blocks say **would have**; simulated freeze durations are not actual paused time, and observe holds have no actual wait samples.
+These are intervention counts and observed measurements, not estimates of work prevented or resources saved.
+The `top` summary shows today's counters for its current mode, omitting trailing fields as width shrinks.
+
+### Report JSON schema version 1
+
+The CLI writes the report object directly, without the IPC envelope.
+The IPC request is `{"version":1,"method":"report","since_days":7}` and its reply is `{"version":1,"type":"report","report":{...}}`.
+Only 1, 7, 30 and 90 are accepted.
+Additive fields deserialize with defaults; consumers should ignore unknown fields.
+
+| Report field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1` |
+| `updated_at_ms` | Latest aggregated Unix millisecond timestamp, or null for empty/older data |
+| `since_days` | Requested local-day window |
+| `from_day`, `through_day` | Inclusive local `YYYY-MM-DD` bounds |
+| `days` | Map of recorded local dates to daily totals; `{}` means no records in this window |
+| `totals` | Combined daily totals for this window |
+| `hold_waits` | `enforce` and `observe` objects: `completed`, nullable `median_seconds`, nullable `worst_seconds` |
+
+Daily and combined totals each have `enforce` and `observe` objects with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `observed_ms`, `elevated_ms`, `critical_ms` | Valid sampled pressure time in milliseconds; unknown intervals, backward clocks and gaps over five seconds are excluded |
+| `freezes_by_agent_kind` | Map from agent kind to freeze aggregates below |
+| `holds` | Heavy command holds, or observe proposals |
+| `hold_wait_seconds` | Sparse frequency map with integer-second string keys `0` through `300`; completed and cancelled waits are rounded down, capped at 300 |
+| `timed_out_holds`, `cancelled_holds` | Completed holds released at the five-minute cap, and disconnected holds |
+| `reclaimed_processes` | Confirmed exited processes after successful cleanup signals for ended agents |
+| `reclaimed_memory_bytes`, `reclaimed_memory_unknown` | Memory in use when reclaimed (last observed at cleanup signalling), and count lacking a memory sample |
+| `services_left_running` | Newly reported surviving service workloads, independent of notification delivery |
+| `kills_blocked` | Cross-agent kill denials, or observe proposals |
+| `forced_resumes` | Resumes at the ten-minute freeze cap, including simulated observe resumes |
+
+The lower median bucket is used for an even number of waits; the worst wait is the largest occupied bucket.
+A hold is counted on admission to the queue, while its wait is counted on completion, possibly on another local day.
+Pending waits lost on daemon restart have no invented completion or wait measurement.
+Reclaimed memory is the sum of per-process measurements, not a claim about memory returned to the OS; shared pages may overlap.
+
+Each freeze aggregate has `count`, `total_ms`, `longest_ms`, `peak_memory_bytes`, `incomplete_memory_samples`, and `pressure_after_30s`.
+Time accumulates across observed intervals and splits at local midnight, including daylight-saving boundaries.
+`longest_ms` is the longest observed duration of one freeze touching that day; peak memory is the largest sampled concurrent frozen footprint for that agent kind.
+Unknown memory samples make the footprint a lower bound.
+`pressure_after_30s` maps pairs such as `critical->normal` to counts, assigned to the freeze's start day.
+The after level is the first valid sample at or after 30 seconds, so it can be later if samples are unavailable.
+A pending comparison is stored as `critical->unknown`; restart leaves it unknown.
+These comparisons show correlation, not causation.
+
+The on-disk object is `{schema_version, updated_at_ms, days}` with the same daily aggregates.
+Snapshot adds defaulted `today: {day, enforce, observe}`; each mode contains `freezes`, `holds`, nullable `median_wait_seconds`, `reclaimed_memory_bytes`, and `kills_blocked`.

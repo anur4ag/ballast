@@ -309,6 +309,7 @@ fn snapshot(
         frozen: Vec::new(),
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 

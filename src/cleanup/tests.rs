@@ -168,6 +168,7 @@ fn snapshot() -> Snapshot {
         frozen: vec![],
         held: Vec::new(),
         guardian: None,
+        today: Default::default(),
     }
 }
 struct Harness {
@@ -249,6 +250,14 @@ fn grace_reclaims_batch_and_internal_but_reports_service_once() {
             .iter()
             .any(|n| n.contains("Reclaimed"))
     );
+    let decisions = std::fs::read_to_string(h.paths.base.join("log/decisions.jsonl")).unwrap();
+    let service_events: Vec<serde_json::Value> = decisions
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|v| v["event"] == "service_reported")
+        .collect();
+    assert_eq!(service_events.len(), 1);
+    assert_eq!(service_events[0]["details"]["decision"]["count"], 1);
 }
 
 #[test]

@@ -19,6 +19,13 @@ enum Command {
         timeout_seconds: u64,
     },
     Top,
+    /// Facts recorded over local calendar days, including today.
+    Report {
+        #[arg(long, default_value = "7d", value_parser = ["1d", "7d", "30d", "90d"])]
+        since: String,
+        #[arg(long)]
+        json: bool,
+    },
     Ps {
         #[arg(long)]
         json: bool,
@@ -89,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Gc => ballast::cleanup::command(None)?,
         Command::Stop { target } => ballast::cleanup::command(Some(target))?,
+        Command::Report { since, json } => ballast::cli::report(&since, json)?,
         Command::Top => ballast::cli::run()?,
         Command::Ps { json } => ballast::cli::ps(json)?,
         Command::Status { json } => ballast::cli::status(json)?,
