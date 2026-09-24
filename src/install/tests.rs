@@ -11,6 +11,8 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
         Self(Installation {
             paths: Paths {
                 base: home.join(".ballast"),
@@ -109,7 +111,7 @@ fn malformed_second_config_never_writes_the_first_or_the_service() {
         "{\"hooks\":{\"Stop\":[{\"matcher\":false,\"hooks\":[]}]}}",
     ] {
         atomic_write(&codex, malformed.as_bytes()).unwrap();
-        let error = fixture.0.install().unwrap_err().to_string();
+        let error = fixture.0.plan(true, false).err().unwrap().to_string();
         assert!(error.contains("malformed"));
         assert_eq!(fs::read(&claude).unwrap(), b"{\"keep\": true}");
         assert_eq!(fs::read(&codex).unwrap(), malformed.as_bytes());
@@ -259,10 +261,10 @@ fn long_socket_path_is_rejected_before_any_install_writes() {
     ));
     fixture.0.validate().unwrap();
     fixture.0.paths.base.as_mut_os_string().push("x");
-    let error = fixture.0.install().unwrap_err().to_string();
+    let error = fixture.0.plan(true, false).err().unwrap().to_string();
     assert!(error.contains(&format!("shorter than {limit} bytes")));
     assert!(error.contains("BALLAST_HOME"));
-    assert_eq!(fs::read_dir(&fixture.0.home).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&fixture.0.home).unwrap().count(), 2);
 }
 
 #[test]
@@ -314,6 +316,54 @@ fn invoked_path_keeps_the_symlink_across_a_cellar_upgrade() {
                 resolve_invocation(invoked, bin.as_os_str()).unwrap(),
                 Some(link.clone())
             );
+        }
+    }
+}
+
+#[test]
+fn approved_plan_is_exact_and_rejects_later_changes_before_any_write() {
+    let fixture = Fixture::new();
+    let original = b"{\"model\":\"keep\"}\n";
+    let claude = fixture.0.claude_dir.join("settings.json");
+    fs::write(&claude, original).unwrap();
+    let plan = fixture.0.plan(true, false).unwrap();
+    let item = plan.items.iter().find(|i| i.id == "claude").unwrap();
+    let file = &item.files[0];
+    assert!(!file.backup.as_ref().unwrap().exists());
+    file.save().unwrap();
+    assert_eq!(
+        fs::read_to_string(&claude).unwrap(),
+        file.after.as_ref().unwrap().as_str()
+    );
+    assert_eq!(fs::read(file.backup.as_ref().unwrap()).unwrap(), original);
+    let (_, code) = fixture.0.apply(&plan);
+    assert_eq!(code, 4);
+    assert!(!fixture.0.service_file().exists());
+    assert!(!fixture.0.codex_dir.join("hooks.json").exists());
+    let repaired = fixture.0.plan(true, false).unwrap();
+    assert!(
+        !repaired
+            .items
+            .iter()
+            .find(|i| i.id == "claude")
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn install_and_uninstall_plans_wrap_without_losing_content() {
+    let fixture = Fixture::new();
+    fixture.merge(true);
+    for installing in [true, false] {
+        let plan = fixture.0.plan(installing, false).unwrap();
+        let text = ui::plan_text(&plan, &fixture.0.home);
+        for width in [60, 80, 120] {
+            let lines = ui::wrapped(&text, width);
+            assert!(lines.iter().all(|l| l.chars().count() <= width as usize));
+            let condensed = |s: &str| s.split_whitespace().collect::<String>();
+            assert_eq!(condensed(&lines.join("\n")), condensed(&text));
+            assert!(lines.len() > 5);
         }
     }
 }

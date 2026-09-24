@@ -13,6 +13,7 @@ impl TestService {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ballast"));
         command
             .arg(action)
+            .arg("--yes")
             .env("HOME", &self.home)
             .env("BALLAST_HOME", self.home.join(".ballast"))
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
@@ -49,7 +50,9 @@ fn uninstall_recovers_when_the_loaded_services_plist_is_missing() {
         home: PathBuf::from(format!("/tmp/blt-install-{unique}")),
         label: format!("dev.ballast.test.{unique}"),
     };
-    fs::create_dir_all(service.home.join(".ballast")).unwrap();
+    for dir in [".ballast", ".claude", ".codex"] {
+        fs::create_dir_all(service.home.join(dir)).unwrap();
+    }
     fs::write(
         service.home.join(".ballast/config.toml"),
         "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = []\n",
@@ -70,7 +73,7 @@ fn uninstall_recovers_when_the_loaded_services_plist_is_missing() {
     .unwrap();
     let output = service.command("install").output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("already loaded"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("already loaded"));
     let output = service.command("uninstall").output().unwrap();
     assert!(
         output.status.success(),
@@ -93,9 +96,5 @@ fn uninstall_recovers_when_the_loaded_services_plist_is_missing() {
         );
     }
     let output = service.command("uninstall").output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(2));
 }

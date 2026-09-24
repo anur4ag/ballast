@@ -555,3 +555,37 @@ fn scoped_sweep_leaves_other_agent_markers_stopped() {
     wait_resumed(owned.pid());
     assert!(is_stopped(other.pid()), "offline sweep ignored its scope");
 }
+
+#[test]
+fn uninstall_recovers_marked_work_without_service_or_journal() {
+    let home = TempHome::new("uninstall");
+    let owned = OwnedSleep::spawn(&home.marker);
+    owned.stop();
+    let run = |flag: &str| {
+        Command::new(env!("CARGO_BIN_EXE_ballast"))
+            .args(["uninstall", flag, "--json"])
+            .env("HOME", &home.path)
+            .env("BALLAST_HOME", &home.path)
+            .env("CLAUDE_CONFIG_DIR", home.path.join("claude"))
+            .env("CODEX_HOME", home.path.join("codex"))
+            .env("BALLAST_SERVICE_DIR", home.path.join("services"))
+            .env("BALLAST_SERVICE_LABEL", &home.marker)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+    assert!(run("--dry-run").status.success());
+    assert!(is_stopped(owned.pid()), "preview resumed work");
+    assert!(!home.frozen_json_path().exists());
+    let applied = run("--yes");
+    assert!(
+        !is_stopped(owned.pid()),
+        "uninstall left marked work frozen: {}",
+        String::from_utf8_lossy(&applied.stdout)
+    );
+    assert!(applied.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(result["items"][0]["status"], "applied");
+    let repeated = run("--yes");
+    assert_eq!(repeated.status.code(), Some(2));
+}
