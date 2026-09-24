@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_void};
 use std::mem::{size_of, size_of_val};
@@ -10,9 +11,11 @@ unsafe extern "C" {
 }
 
 pub struct NativePlatform {
+    cache: ProcessCache,
     page_size: u64,
     arg_max: usize,
     pids: Vec<i32>,
+    live: HashSet<ProcessIdentity>,
     details: HashMap<ProcessIdentity, (Option<String>, Option<Vec<String>>)>,
 }
 
@@ -27,10 +30,12 @@ impl NativePlatform {
             return Err(invalid_data());
         }
         Ok(Self {
+            cache: ProcessCache::default(),
             page_size: page_size as u64,
             arg_max: arg_max as usize,
             pids: vec![0; 2048],
-            details: HashMap::new(),
+            details: HashMap::with_capacity(2048),
+            live: HashSet::with_capacity(2048),
         })
     }
 
@@ -125,7 +130,12 @@ impl Platform for NativePlatform {
         Ok(format!("{}:{}", boot.tv_sec, boot.tv_usec))
     }
 
-    fn list_processes(&mut self) -> io::Result<Vec<Process>> {
+    fn list_processes(
+        &mut self,
+        watched: &HashSet<ProcessIdentity>,
+        metrics: &HashSet<ProcessIdentity>,
+    ) -> io::Result<Vec<Process>> {
+        let selected_pids = watched.iter().chain(metrics).map(|id| id.pid).collect();
         let count = loop {
             let count = unsafe {
                 libc::proc_listallpids(
@@ -142,20 +152,31 @@ impl Platform for NativePlatform {
             self.pids.resize(self.pids.len() * 2, 0);
         };
         let mut processes = Vec::with_capacity(count);
-        let mut live = HashSet::with_capacity(count);
+        self.live.clear();
+        let now = Instant::now();
+        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         for index in 0..count {
             let pid = self.pids[index];
+            if let Some(process) = self.cache.get(pid, now, &selected_pids) {
+                self.live.insert(process.identity);
+                processes.push(process);
+                continue;
+            }
             let Some(info) = Self::bsd(pid) else {
                 continue;
             };
             let id = identity(&info);
-            let exe = executable(pid);
-            if self.details.get(&id).is_none_or(|cached| cached.0 != exe) {
+            let exe = executable(pid, &mut path);
+            if self
+                .details
+                .get(&id)
+                .is_none_or(|cached| cached.0.as_deref() != exe.as_deref())
+            {
                 let argv = self.args(pid).map(|(argv, _)| argv);
-                self.details.insert(id, (exe, argv));
+                self.details.insert(id, (exe.map(Cow::into_owned), argv));
             }
             let (exe, argv) = self.details.get(&id).expect("inserted process details");
-            processes.push(Process {
+            let process = Process {
                 identity: id,
                 ppid: info.pbi_ppid as i32,
                 pgid: info.pbi_pgid as i32,
@@ -163,11 +184,14 @@ impl Platform for NativePlatform {
                 stopped: info.pbi_status == 4,
                 exe: exe.clone(),
                 argv: argv.clone(),
-                metrics: Self::metrics(pid),
-            });
-            live.insert(id);
+                metrics: metrics.contains(&id).then(|| Self::metrics(pid)).flatten(),
+            };
+            self.cache.insert(&process, now);
+            processes.push(process);
+            self.live.insert(id);
         }
-        self.details.retain(|id, _| live.contains(id));
+        self.details.retain(|id, _| self.live.contains(id));
+        self.cache.retain(&self.live);
         Ok(processes)
     }
 
@@ -308,13 +332,15 @@ fn identity(info: &libc::proc_bsdinfo) -> ProcessIdentity {
     }
 }
 
-fn executable(pid: i32) -> Option<String> {
-    let mut bytes = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+fn executable(pid: i32, bytes: &mut [u8]) -> Option<Cow<'_, str>> {
     let size = unsafe { libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
     (size > 0).then(|| {
-        String::from_utf8_lossy(&bytes[..size as usize])
-            .trim_end_matches('\0')
-            .to_owned()
+        let data = &bytes[..size as usize];
+        let end = data
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(data.len());
+        String::from_utf8_lossy(&data[..end])
     })
 }
 

@@ -1,0 +1,338 @@
+pub mod files;
+pub mod ipc;
+#[cfg(test)]
+mod tests;
+
+use crate::platform::{
+    Capabilities, NativePlatform, Platform, PressureInputs, Process, ProcessIdentity,
+};
+use files::{Config, Mode, Paths, RotatingLog};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Status {
+    pub daemon_version: String,
+    pub pid: u32,
+    pub mode: Mode,
+    pub tick: u64,
+    pub sampled_at_ms: u64,
+    pub tick_interval_ms: u64,
+    pub tick_cpu_ns: u64,
+    pub tick_wall_ns: u64,
+    pub sample_discarded: bool,
+    pub process_count: usize,
+    pub last_error: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub status: Status,
+    pub boot_id: String,
+    pub capabilities: Capabilities,
+    pub processes: Vec<Process>,
+    pub changes: ProcessChanges,
+    pub pressure: Option<PressureInputs>,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ProcessChanges {
+    pub started: Vec<ProcessIdentity>,
+    pub exited: Vec<ProcessIdentity>,
+    pub exec_changed: Vec<ProcessIdentity>,
+}
+
+/// The guardian changes cadence through this state, on the tick thread only.
+pub struct Observer {
+    previous: HashMap<ProcessIdentity, Option<String>>,
+    current: HashSet<ProcessIdentity>,
+    interval: Duration,
+    last_tick: Option<(Instant, SystemTime)>,
+}
+impl Default for Observer {
+    fn default() -> Self {
+        Self {
+            previous: HashMap::with_capacity(2048),
+            current: HashSet::with_capacity(2048),
+            interval: Duration::from_secs(1),
+            last_tick: None,
+        }
+    }
+}
+impl Observer {
+    pub fn set_fast_polling(&mut self, fast: bool) {
+        self.interval = Duration::from_millis(if fast { 250 } else { 1000 });
+    }
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+    pub fn begin_tick(&mut self, now: Instant, wall: SystemTime) -> bool {
+        let discard = self.last_tick.is_none_or(|(previous, previous_wall)| {
+            now.duration_since(previous) > self.interval * 5
+                || wall
+                    .duration_since(previous_wall)
+                    .map_or(true, |gap| gap > self.interval * 5)
+        });
+        self.last_tick = Some((now, wall));
+        discard
+    }
+    pub fn diff(&mut self, processes: &[Process]) -> ProcessChanges {
+        let mut changes = ProcessChanges::default();
+        self.current.clear();
+        for process in processes {
+            match self.previous.get_mut(&process.identity) {
+                None => {
+                    changes.started.push(process.identity);
+                    self.previous.insert(process.identity, process.exe.clone());
+                }
+                Some(exe) if *exe != process.exe => {
+                    changes.exec_changed.push(process.identity);
+                    exe.clone_from(&process.exe);
+                }
+                Some(_) => {}
+            }
+            self.current.insert(process.identity);
+        }
+        changes.exited.extend(
+            self.previous
+                .keys()
+                .filter(|id| !self.current.contains(id))
+                .copied(),
+        );
+        self.previous.retain(|id, _| self.current.contains(id));
+        changes
+    }
+}
+
+pub fn run(paths: Paths) -> io::Result<()> {
+    run_with_targets(paths, HashSet::new(), HashSet::new())
+}
+
+fn run_with_targets(
+    paths: Paths,
+    watched: HashSet<ProcessIdentity>,
+    metric_targets: HashSet<ProcessIdentity>,
+) -> io::Result<()> {
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "run ballast daemon as your user, never root",
+        ));
+    }
+    // Set before spawning threads so socket creation is private from the outset.
+    unsafe {
+        libc::umask(0o077);
+    }
+    paths.prepare()?;
+    let config = Config::load(&paths)?;
+    let server = ipc::Server::bind(paths.clone())?;
+    let mut log = RotatingLog::open(paths.base.join("log/daemon.log"), &config)?;
+    let _decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
+    log.write_line(&format!(
+        "{} daemon {} starting",
+        unix_ms(),
+        env!("CARGO_PKG_VERSION")
+    ))?;
+    let mut platform = NativePlatform::new()?;
+    let boot_id = platform.boot_id()?;
+    let capabilities = platform.capabilities();
+    let mut status = Status {
+        daemon_version: env!("CARGO_PKG_VERSION").into(),
+        pid: std::process::id(),
+        mode: config.mode,
+        tick: 0,
+        sampled_at_ms: 0,
+        tick_interval_ms: 1000,
+        tick_cpu_ns: 0,
+        tick_wall_ns: 0,
+        sample_discarded: true,
+        process_count: 0,
+        last_error: None,
+    };
+    let published = Arc::new(RwLock::new(Arc::new(Snapshot {
+        status: status.clone(),
+        boot_id: boot_id.clone(),
+        capabilities,
+        processes: Vec::new(),
+        changes: ProcessChanges::default(),
+        pressure: None,
+    })));
+    let (send, requests) = mpsc::sync_channel(128);
+    let mut socket_server = Some((server, send));
+    let heartbeat = Arc::new(AtomicU64::new(0));
+    start_watchdog(Arc::clone(&heartbeat))?;
+    tick_qos()?;
+    let mut observer = Observer::default();
+    let mut next_tick = Instant::now();
+    loop {
+        if Instant::now() >= next_tick {
+            let started = Instant::now();
+            let cpu = thread_cpu_ns()?;
+            let discard = observer.begin_tick(started, SystemTime::now());
+            status.tick += 1;
+            status.sampled_at_ms = unix_ms();
+            status.tick_interval_ms = observer.interval().as_millis() as u64;
+            status.sample_discarded = discard;
+            status.last_error = None;
+            let observed = platform.list_processes(&watched, &metric_targets);
+            let pressure = platform.pressure();
+            let snapshot = match (observed, pressure) {
+                (Ok(processes), pressure) => {
+                    let changes = observer.diff(&processes);
+                    status.process_count = processes.len();
+                    let pressure = match pressure {
+                        Ok(pressure) if !discard => Some(pressure),
+                        Ok(_) => None,
+                        Err(error) => {
+                            status.last_error = Some(error.to_string());
+                            None
+                        }
+                    };
+                    Some((processes, changes, pressure))
+                }
+                (Err(error), _) => {
+                    status.last_error = Some(error.to_string());
+                    None
+                }
+            };
+            if let Some(error) = &status.last_error {
+                status.sample_discarded = true;
+                if let Err(write_error) =
+                    log.write_line(&format!("{} observation failed: {error}", unix_ms()))
+                {
+                    eprintln!("daemon log failed: {write_error}");
+                }
+            }
+            let next = if let Some((processes, changes, pressure)) = snapshot {
+                Snapshot {
+                    status: status.clone(),
+                    boot_id: boot_id.clone(),
+                    capabilities,
+                    processes,
+                    changes,
+                    pressure,
+                }
+            } else {
+                // A failed scan must not manufacture exits or reset attribution.
+                let previous = published.read().unwrap();
+                Snapshot {
+                    status: status.clone(),
+                    boot_id: boot_id.clone(),
+                    capabilities,
+                    processes: previous.processes.clone(),
+                    changes: ProcessChanges::default(),
+                    pressure: None,
+                }
+            };
+            {
+                let mut view = published.write().unwrap();
+                *view = Arc::new(next);
+                // Include snapshot construction and retirement before publishing timing.
+                let next = Arc::get_mut(&mut view).expect("new snapshot has no readers yet");
+                next.status.tick_cpu_ns = thread_cpu_ns()?.saturating_sub(cpu);
+                next.status.tick_wall_ns = started.elapsed().as_nanos() as u64;
+            }
+            heartbeat.fetch_add(1, Ordering::Relaxed);
+            if let Some((server, send)) = socket_server.take() {
+                let view = Arc::clone(&published);
+                thread::Builder::new().name("ipc".into()).spawn(move || {
+                    if let Err(error) = server.run(view, send) {
+                        eprintln!("daemon socket server failed: {error}");
+                        std::process::exit(1);
+                    }
+                })?;
+            }
+            next_tick = started + observer.interval();
+        }
+        match requests.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+            Ok(request) => {
+                if !request.cancelled.load(Ordering::Relaxed) {
+                    // Guardian, cleanup and hook tickets supply these loop-owned handlers.
+                    let _ = request
+                        .reply
+                        .send(ipc::Response::error("request is not implemented yet"));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("socket server stopped"));
+            }
+        }
+    }
+}
+
+pub fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+fn thread_cpu_ns() -> io::Result<u64> {
+    let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+}
+fn tick_qos() -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let result = unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+        };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+        let mut actual = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+        let mut priority = 0;
+        let result = unsafe {
+            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut actual, &mut priority)
+        };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+        if actual as u32 != libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as u32 {
+            return Err(io::Error::other(
+                "tick thread did not acquire user-interactive QoS",
+            ));
+        }
+    }
+    Ok(())
+}
+fn start_watchdog(heartbeat: Arc<AtomicU64>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            let mut observed = 0;
+            let mut progress = Instant::now();
+            let mut previous_wake = (Instant::now(), SystemTime::now());
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                let now = Instant::now();
+                let wall = SystemTime::now();
+                let tick = heartbeat.load(Ordering::Relaxed);
+                // A sleeping machine cannot make progress. Give the loop a fresh grace period on wake.
+                if tick != observed
+                    || now.duration_since(previous_wake.0) > Duration::from_secs(5)
+                    || wall
+                        .duration_since(previous_wake.1)
+                        .map_or(true, |gap| gap > Duration::from_secs(5))
+                {
+                    observed = tick;
+                    progress = now;
+                }
+                previous_wake = (now, wall);
+                if now.duration_since(progress) >= Duration::from_secs(30) {
+                    eprintln!("daemon watchdog: tick stalled for 30 seconds");
+                    std::process::exit(1);
+                }
+            }
+        })?;
+    Ok(())
+}

@@ -17,7 +17,10 @@ enum Command {
     },
     Top,
     Ps,
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     Gc,
     Stop {
         target: String,
@@ -49,17 +52,52 @@ enum DebugCommand {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
+        Command::Status { json } => {
+            use ballast::daemon::{
+                files::Paths,
+                ipc::{Client, Method, Reply},
+            };
+            let response = Client::connect(&Paths::from_env()?, std::time::Duration::from_secs(1))
+                .and_then(|mut client| client.request(Method::Status))
+                .map_err(|error| format!("daemon unreachable: {error}"))?;
+            let Reply::Status { status } = &response.reply else {
+                return Err("unexpected daemon status response".into());
+            };
+            if json {
+                println!("{}", serde_json::to_string(&response)?);
+            } else {
+                println!(
+                    "Ballast {} running (pid {})\ntick {}: {:.3} ms CPU, {:.3} ms wall, {} ms interval; {} processes",
+                    status.daemon_version,
+                    status.pid,
+                    status.tick,
+                    status.tick_cpu_ns as f64 / 1_000_000.0,
+                    status.tick_wall_ns as f64 / 1_000_000.0,
+                    status.tick_interval_ms,
+                    status.process_count
+                );
+                if let Some(error) = &status.last_error {
+                    println!("Last observation failed: {error}");
+                }
+            }
+        }
         Command::Debug {
             command: DebugCommand::Platform,
         } => {
             let mut platform = NativePlatform::new()?;
+            let mut processes =
+                platform.list_processes(&Default::default(), &Default::default())?;
+            for process in &mut processes {
+                process.metrics = platform.process_metrics(process.identity);
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "capabilities": platform.capabilities(),
                 "boot_id": platform.boot_id()?,
                     "pressure": platform.pressure()?,
-                    "processes": platform.list_processes()?,
+                    "processes": processes,
                 }))?
             );
         }

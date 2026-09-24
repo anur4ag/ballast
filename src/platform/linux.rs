@@ -1,14 +1,20 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
+use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
+use std::time::Instant;
 
 pub struct NativePlatform {
+    cache: ProcessCache,
     page_size: u64,
     ticks: u64,
-    details: HashMap<ProcessIdentity, (Option<String>, Option<Vec<String>>)>,
+    live: HashSet<ProcessIdentity>,
+    stat_buffer: Vec<u8>,
+    path_buffer: String,
     atomic_signals: bool,
 }
 
@@ -25,40 +31,73 @@ impl NativePlatform {
             Err(error) => return Err(error),
         };
         Ok(Self {
+            cache: ProcessCache::default(),
             page_size: page_size as u64,
             ticks: ticks as u64,
-            details: HashMap::new(),
+            live: HashSet::with_capacity(2048),
+            stat_buffer: Vec::with_capacity(1024),
+            path_buffer: String::with_capacity(64),
             atomic_signals,
         })
     }
 
-    fn stat(&self, pid: i32) -> Option<Process> {
+    fn stat(
+        &self,
+        pid: i32,
+        contents: &mut Vec<u8>,
+        path: &mut String,
+        now: Instant,
+        want_metrics: impl FnOnce(ProcessIdentity) -> bool,
+    ) -> Option<Process> {
         if pid <= 0 {
             return None;
         }
-        let path = format!("/proc/{pid}/stat");
-        let contents = fs::read(&path).ok()?;
+        path.clear();
+        write!(path, "/proc/{pid}/stat").ok()?;
+        let mut file = fs::File::open(&*path).ok()?;
+        contents.clear();
+        // Avoid File's size/position probes: procfs reports size zero anyway.
+        (&mut file).take(u64::MAX).read_to_end(contents).ok()?;
         let suffix = contents.get(contents.iter().rposition(|&byte| byte == b')')? + 2..)?;
-        let fields: Vec<_> = std::str::from_utf8(suffix)
-            .ok()?
-            .split_whitespace()
-            .collect();
+        let mut fields = [""; 20];
+        for (slot, value) in fields
+            .iter_mut()
+            .zip(std::str::from_utf8(suffix).ok()?.split_whitespace())
+        {
+            *slot = value;
+        }
         let number = |index: usize| fields.get(index)?.parse::<u64>().ok();
         let cpu_time_ns = number(11)?
             .saturating_add(number(12)?)
             .saturating_mul(1_000_000_000)
             / self.ticks;
-        let resident_pages = fs::read_to_string(format!("/proc/{pid}/statm"))
-            .ok()
-            .and_then(|data| data.split_whitespace().nth(1)?.parse::<u64>().ok());
+        let identity = ProcessIdentity {
+            pid,
+            start_time: number(19)?,
+        };
+        let uid = match self
+            .cache
+            .0
+            .get(&pid)
+            .filter(|(deadline, cached)| now < *deadline && cached.identity == identity)
+        {
+            Some((_, cached)) => cached.uid,
+            None => file.metadata().ok()?.uid(),
+        };
+        let resident_pages = want_metrics(identity)
+            .then(|| {
+                path.clear();
+                write!(path, "/proc/{pid}/statm").ok()?;
+                fs::read_to_string(&*path)
+                    .ok()
+                    .and_then(|data| data.split_whitespace().nth(1)?.parse::<u64>().ok())
+            })
+            .flatten();
         Some(Process {
-            identity: ProcessIdentity {
-                pid,
-                start_time: number(19)?,
-            },
+            identity,
             ppid: number(1)? as i32,
             pgid: number(2)? as i32,
-            uid: fs::metadata(path).ok()?.uid(),
+            uid,
             stopped: matches!(fields.first().copied(), Some("T" | "t")),
             exe: None,
             argv: None,
@@ -70,7 +109,14 @@ impl NativePlatform {
     }
 
     fn matches(&self, id: ProcessIdentity) -> bool {
-        self.stat(id.pid).is_some_and(|p| p.identity == id)
+        self.stat(
+            id.pid,
+            &mut Vec::with_capacity(1024),
+            &mut String::with_capacity(64),
+            Instant::now(),
+            |_| false,
+        )
+        .is_some_and(|p| p.identity == id)
     }
 }
 
@@ -93,51 +139,81 @@ impl Platform for NativePlatform {
             .to_owned())
     }
 
-    fn list_processes(&mut self) -> io::Result<Vec<Process>> {
-        let mut processes = Vec::with_capacity(self.details.len());
-        let mut live = HashSet::with_capacity(self.details.len());
-        for entry in fs::read_dir("/proc")?.flatten() {
+    fn list_processes(
+        &mut self,
+        watched: &HashSet<ProcessIdentity>,
+        metrics: &HashSet<ProcessIdentity>,
+    ) -> io::Result<Vec<Process>> {
+        let selected_pids = watched.iter().chain(metrics).map(|id| id.pid).collect();
+        let mut processes = Vec::with_capacity(self.cache.0.len());
+        let entries = fs::read_dir("/proc")?;
+        let mut buffer = std::mem::take(&mut self.stat_buffer);
+        let mut path = std::mem::take(&mut self.path_buffer);
+        self.live.clear();
+        let now = Instant::now();
+        for entry in entries.flatten() {
             let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
                 continue;
             };
-            let Some(mut process) = self.stat(pid) else {
+            if let Some(process) = self.cache.get(pid, now, &selected_pids) {
+                self.live.insert(process.identity);
+                processes.push(process);
+                continue;
+            }
+            let Some(mut process) =
+                self.stat(pid, &mut buffer, &mut path, now, |id| metrics.contains(&id))
+            else {
                 continue;
             };
-            let exe = fs::read_link(format!("/proc/{pid}/exe"))
+            path.clear();
+            write!(&mut path, "/proc/{pid}/exe").unwrap();
+            process.exe = fs::read_link(&path)
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned());
-            if self
-                .details
-                .get(&process.identity)
-                .is_none_or(|cached| cached.0 != exe)
-            {
-                let argv = fs::read(format!("/proc/{pid}/cmdline"))
-                    .ok()
-                    .and_then(|bytes| {
-                        if !bytes.is_empty() && bytes.last() != Some(&0) {
-                            return None;
-                        }
-                        Some(
-                            bytes
-                                .strip_suffix(&[0])
-                                .unwrap_or(&bytes)
-                                .split(|&b| b == 0)
-                                .map(|arg| String::from_utf8_lossy(arg).into_owned())
-                                .collect(),
-                        )
-                    });
-                self.details.insert(process.identity, (exe, argv));
+            if self.cache.0.get(&pid).is_some_and(|(_, cached)| {
+                cached.identity == process.identity && cached.exe != process.exe
+            }) {
+                path.clear();
+                write!(&mut path, "/proc/{pid}").unwrap();
+                let Ok(metadata) = fs::metadata(&path) else {
+                    continue;
+                };
+                process.uid = metadata.uid();
             }
-            let details = self
-                .details
-                .get(&process.identity)
-                .expect("inserted process details");
-            process.exe.clone_from(&details.0);
-            process.argv.clone_from(&details.1);
-            live.insert(process.identity);
+            let cached_argv = self.cache.0.get(&pid).filter(|(deadline, cached)| {
+                now < *deadline
+                    && cached.identity == process.identity
+                    && cached.exe == process.exe
+                    && cached
+                        .argv
+                        .as_ref()
+                        .is_some_and(|args| args.iter().any(|arg| !arg.is_empty()))
+            });
+            if let Some((_, cached)) = cached_argv {
+                process.argv.clone_from(&cached.argv);
+            } else {
+                path.clear();
+                write!(&mut path, "/proc/{pid}/cmdline").unwrap();
+                process.argv = fs::read(&path).ok().and_then(|bytes| {
+                    // During exec, procfs can expose the new exe before cmdline is ready.
+                    if bytes.is_empty() || bytes.last() != Some(&0) {
+                        return None;
+                    }
+                    Some(
+                        bytes[..bytes.len() - 1]
+                            .split(|&b| b == 0)
+                            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                            .collect(),
+                    )
+                });
+            }
+            self.cache.insert(&process, now);
+            self.live.insert(process.identity);
             processes.push(process);
         }
-        self.details.retain(|id, _| live.contains(id));
+        self.stat_buffer = buffer;
+        self.path_buffer = path;
+        self.cache.retain(&self.live);
         Ok(processes)
     }
 
@@ -151,7 +227,13 @@ impl Platform for NativePlatform {
     }
 
     fn process_metrics(&self, id: ProcessIdentity) -> Option<ProcessMetrics> {
-        let process = self.stat(id.pid)?;
+        let process = self.stat(
+            id.pid,
+            &mut Vec::with_capacity(1024),
+            &mut String::with_capacity(64),
+            Instant::now(),
+            |_| true,
+        )?;
         (process.identity == id).then_some(process.metrics?)
     }
 
@@ -313,3 +395,7 @@ fn has_notify_send() -> bool {
         })
     })
 }
+
+#[cfg(test)]
+#[path = "linux_tests.rs"]
+mod tests;

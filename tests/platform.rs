@@ -9,6 +9,7 @@
 //! raw fork ever runs inside this multithreaded test process.
 
 use ballast::platform::{NativePlatform, Platform, Process, ProcessIdentity, Signal};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::process::CommandExt;
@@ -142,7 +143,7 @@ fn lists_child_with_correct_ppid_pgid_and_stable_start_time() {
     wait_until(
         "spawned child to appear in list_processes",
         || match platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).cloned())
         {
@@ -169,7 +170,9 @@ fn lists_child_with_correct_ppid_pgid_and_stable_start_time() {
     );
 
     sleep(Duration::from_millis(50));
-    let processes = platform.list_processes().expect("second list_processes");
+    let processes = platform
+        .list_processes(&Default::default(), &Default::default())
+        .expect("second list_processes");
     let second = find(&processes, child_pid).expect("child still listed");
     assert_eq!(
         Some(second.identity.start_time),
@@ -191,7 +194,7 @@ fn reads_environment_of_a_direct_child() {
     let mut identity = None;
     wait_until("spawned child to appear in list_processes", || {
         identity = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
         identity.is_some()
@@ -231,7 +234,7 @@ fn reads_environment_of_a_double_forked_detached_grandchild() {
         "double-forked grandchild to appear in list_processes",
         || {
             identity = platform
-                .list_processes()
+                .list_processes(&Default::default(), &Default::default())
                 .ok()
                 .and_then(|ps| find(&ps, grandchild_pid).map(|p| p.identity));
             identity.is_some()
@@ -260,7 +263,7 @@ fn exe_and_argv_cache_refreshes_after_exec_replaces_the_process_image() {
     let mut before = None;
     wait_until("child to appear in list_processes before exec", || {
         before = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).cloned());
         before.is_some()
@@ -280,7 +283,7 @@ fn exe_and_argv_cache_refreshes_after_exec_replaces_the_process_image() {
     let mut after = None;
     wait_until("argv to reflect the exec'd program", || {
         after = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).cloned());
         after.as_ref().is_some_and(|p| {
@@ -295,6 +298,79 @@ fn exe_and_argv_cache_refreshes_after_exec_replaces_the_process_image() {
     assert_ne!(
         before.argv, after.argv,
         "argv must be refreshed alongside exe"
+    );
+}
+
+#[test]
+fn watching_a_child_forces_a_full_refresh_on_a_single_scan() {
+    let mut platform = NativePlatform::new().expect("NativePlatform::new");
+    let mut child = spawn_child("exec_barrier_self_stop", "watched_exec_and_stop");
+    let child_pid = child.id() as i32;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut guard = ChildGuard(child);
+    ready_payload(&read_status_line(stdout));
+
+    // Populate a cache entry before the exec: without one, any scan would
+    // trivially look "fresh" and the regression couldn't fail.
+    let mut identity = None;
+    wait_until("child to appear in list_processes before exec", || {
+        identity = platform
+            .list_processes(&Default::default(), &Default::default())
+            .ok()
+            .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
+        identity.is_some()
+    });
+    let identity = identity.unwrap();
+    let watched = HashSet::from([identity]);
+
+    release_barrier(&mut guard.0);
+
+    // Deterministic OS synchronization instead of polling list_processes:
+    // the child execs into `sh -c 'kill -STOP $$; exec sleep 60'`, which
+    // stops itself only after the exec has landed, so waitpid(WUNTRACED)
+    // reporting it proves both the exec and the stop already happened.
+    // Bounded (WNOHANG + a 5s deadline) so a broken fixture fails this test
+    // instead of hanging the whole suite.
+    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    let mut wait_status = 0i32;
+    loop {
+        let waited =
+            unsafe { libc::waitpid(child_pid, &mut wait_status, libc::WUNTRACED | libc::WNOHANG) };
+        assert!(
+            waited >= 0,
+            "waitpid failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if waited == child_pid && libc::WIFSTOPPED(wait_status) {
+            break;
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "child did not report stopped via waitpid within 5s"
+        );
+        sleep(Duration::from_millis(5));
+    }
+
+    // A single scan, immediately, with the identity watched: if the
+    // "watched" bypass is broken (e.g. ProcessCache.get ignores it), this
+    // observes the stale pre-exec cache entry instead.
+    let process = platform
+        .list_processes(&watched, &Default::default())
+        .expect("list_processes")
+        .into_iter()
+        .find(|p| p.identity == identity)
+        .expect("child must still be listed");
+    assert!(
+        process
+            .exe
+            .as_deref()
+            .is_some_and(|exe| exe.ends_with("sh")),
+        "a single watched scan must already show the exec'd program, got {:?}",
+        process.exe
+    );
+    assert!(
+        process.stopped,
+        "a single watched scan must already show the child as stopped"
     );
 }
 
@@ -316,7 +392,7 @@ fn memory_and_cpu_metrics_are_nonzero_for_a_running_child() {
     let mut identity = None;
     wait_until("busy child to appear in list_processes", || {
         identity = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
         identity.is_some()
@@ -332,6 +408,69 @@ fn memory_and_cpu_metrics_are_nonzero_for_a_running_child() {
     assert!(
         metrics.cpu_time_ns > 0,
         "a busy-spinning process must have accrued CPU time"
+    );
+}
+
+#[test]
+fn list_processes_only_samples_metrics_for_requested_identities() {
+    let mut platform = NativePlatform::new().expect("NativePlatform::new");
+    let mut child = spawn_child("busy", "selective_metrics");
+    let child_pid = child.id() as i32;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let _guard = ChildGuard(child);
+    ready_payload(&read_status_line(stdout));
+
+    sleep(Duration::from_millis(150)); // let it actually burn some CPU
+
+    let mut identity = None;
+    wait_until("busy child to appear in list_processes", || {
+        identity = platform
+            .list_processes(&Default::default(), &Default::default())
+            .ok()
+            .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
+        identity.is_some()
+    });
+    let identity = identity.unwrap();
+
+    let unselected = platform
+        .list_processes(&Default::default(), &Default::default())
+        .expect("list_processes with an empty metrics set");
+    assert!(
+        find(&unselected, child_pid)
+            .expect("child still listed")
+            .metrics
+            .is_none(),
+        "an empty metrics set must skip resource sampling entirely"
+    );
+
+    let wanted = HashSet::from([identity]);
+    let selected = platform
+        .list_processes(&HashSet::new(), &wanted)
+        .expect("list_processes with the child selected");
+    let metrics = find(&selected, child_pid)
+        .expect("child still listed")
+        .metrics
+        .expect("a requested identity must carry sampled metrics");
+    assert!(
+        metrics.memory_bytes > 0,
+        "a running process must have nonzero RSS"
+    );
+
+    let stale = ProcessIdentity {
+        pid: identity.pid,
+        start_time: identity.start_time.wrapping_add(1),
+    };
+    let mismatched = platform
+        .list_processes(&HashSet::new(), &HashSet::from([stale]))
+        .expect("list_processes with a stale identity selected");
+    let process = find(&mismatched, child_pid).expect("child stays listed under its real identity");
+    assert_eq!(
+        process.identity, identity,
+        "the live process's own identity must be unaffected by an unmatched request"
+    );
+    assert!(
+        process.metrics.is_none(),
+        "a mismatched start_time must not receive sampled metrics, even though the pid is live"
     );
 }
 
@@ -375,7 +514,7 @@ fn check_listening_port(mode: &str, marker: &str) {
     let mut identity = None;
     wait_until("listening child to appear in list_processes", || {
         identity = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
         identity.is_some()
@@ -478,7 +617,7 @@ fn macos_restricted_binary_reports_environment_as_unknown() {
     wait_until(
         "restricted child to appear in list_processes",
         || match platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).cloned())
         {
@@ -525,7 +664,7 @@ fn macos_unrestricted_child_with_cleared_env_reports_known_empty() {
     let mut identity = None;
     wait_until("env_clear child to appear in list_processes", || {
         identity = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
         identity.is_some()
@@ -555,7 +694,7 @@ fn linux_child_renamed_to_invalid_utf8_stays_listed_and_signalable() {
         "child to appear in list_processes under its normal name",
         || {
             identity = platform
-                .list_processes()
+                .list_processes(&Default::default(), &Default::default())
                 .ok()
                 .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
             identity.is_some()
@@ -581,7 +720,7 @@ fn linux_child_renamed_to_invalid_utf8_stays_listed_and_signalable() {
         "renamed child to still be listed under the same identity",
         || {
             platform
-                .list_processes()
+                .list_processes(&Default::default(), &Default::default())
                 .ok()
                 .is_some_and(|ps| find(&ps, child_pid).is_some_and(|p| p.identity == identity))
         },
@@ -592,7 +731,7 @@ fn linux_child_renamed_to_invalid_utf8_stays_listed_and_signalable() {
         .expect("SIGSTOP should still work after an invalid-UTF-8 rename");
     wait_until("renamed child to report stopped", || {
         platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.stopped))
             == Some(true)
@@ -603,7 +742,7 @@ fn linux_child_renamed_to_invalid_utf8_stays_listed_and_signalable() {
         .expect("SIGCONT should still work after an invalid-UTF-8 rename");
     wait_until("renamed child to report running again", || {
         platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.stopped))
             == Some(false)
@@ -626,7 +765,7 @@ fn sigstop_sigcont_round_trip() {
     let mut identity = None;
     wait_until("child to appear in list_processes", || {
         match platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).cloned())
         {
@@ -645,7 +784,7 @@ fn sigstop_sigcont_round_trip() {
         .expect("SIGSTOP should succeed on a live child");
     wait_until("child to report stopped after SIGSTOP", || {
         platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.stopped))
             == Some(true)
@@ -656,7 +795,7 @@ fn sigstop_sigcont_round_trip() {
         .expect("SIGCONT should succeed on a stopped child");
     wait_until("child to report running again after SIGCONT", || {
         platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.stopped))
             == Some(false)
@@ -701,7 +840,7 @@ fn stale_identity_cannot_signal_or_read() {
     let mut identity = None;
     wait_until("child to appear in list_processes", || {
         identity = platform
-            .list_processes()
+            .list_processes(&Default::default(), &Default::default())
             .ok()
             .and_then(|ps| find(&ps, child_pid).map(|p| p.identity));
         identity.is_some()
@@ -772,7 +911,7 @@ fn scan_benchmark_at_about_1000_processes() {
     let target_total = 1000usize;
 
     let baseline = platform
-        .list_processes()
+        .list_processes(&Default::default(), &Default::default())
         .expect("baseline list_processes")
         .len();
     println!("baseline process count before spawning fillers: {baseline}");
@@ -807,7 +946,7 @@ fn scan_benchmark_at_about_1000_processes() {
     sleep(Duration::from_millis(200));
 
     let actual_total = platform
-        .list_processes()
+        .list_processes(&Default::default(), &Default::default())
         .expect("post-spawn list_processes")
         .len();
     println!(
@@ -822,7 +961,7 @@ fn scan_benchmark_at_about_1000_processes() {
 
     // Warm up (page-in code paths, caches) before timing.
     for _ in 0..3 {
-        let _ = platform.list_processes();
+        let _ = platform.list_processes(&Default::default(), &Default::default());
         let _ = platform.pressure();
     }
 
@@ -838,7 +977,9 @@ fn scan_benchmark_at_about_1000_processes() {
     );
     let wall_start = Instant::now();
     for _ in 0..iterations {
-        let _ = platform.list_processes().expect("timed list_processes");
+        let _ = platform
+            .list_processes(&Default::default(), &Default::default())
+            .expect("timed list_processes");
         let _ = platform.pressure().expect("timed pressure");
     }
     let wall_elapsed = wall_start.elapsed();
@@ -898,6 +1039,18 @@ fn child_helper() {
             // returns on failure.
             let err = Command::new("sleep").arg("3600").exec();
             panic!("exec sleep failed: {err}");
+        }
+        "exec_barrier_self_stop" => {
+            writeln!(stdout, "READY").unwrap();
+            stdout.flush().unwrap();
+            read_barrier();
+            // Execs into a shell that stops itself before continuing, so a
+            // parent synchronizing on waitpid(WUNTRACED) observes both the
+            // exec and the stop as already-settled kernel state.
+            let err = Command::new("/bin/sh")
+                .args(["-c", "kill -STOP $$; exec sleep 60"])
+                .exec();
+            panic!("exec sh failed: {err}");
         }
         #[cfg(target_os = "linux")]
         "linux_rename" => {
