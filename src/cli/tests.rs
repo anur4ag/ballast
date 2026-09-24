@@ -336,17 +336,28 @@ fn fleet_tree_columns_and_optional_section_gaps() {
                 let line = screen.lines().find(|line| line.contains(text)).unwrap();
                 assert_eq!(line.find(text), Some(label));
             }
-        } else {
-            let lines: Vec<_> = screen.lines().collect();
-            for text in ["PAUSED & WAITING", "FLEET  "] {
-                let index = lines
-                    .iter()
-                    .position(|line| line.starts_with(text))
-                    .unwrap();
-                assert!(lines[index - 1].is_empty());
-            }
+        }
+        let lines: Vec<_> = screen.lines().collect();
+        for text in ["PAUSED & WAITING", "FLEET  "] {
+            let index = lines
+                .iter()
+                .position(|line| line.starts_with(text))
+                .unwrap();
+            assert!(lines[index - 1].is_empty());
         }
     }
-    let short = render(&s, 80, 12, &mut 0);
-    assert!(!short.contains("\n\n"), "{short}");
+    for width in [80, 160] {
+        let short = render(&s, width, 12, &mut 0);
+        assert!(!short.contains("\n\n"), "{short}");
+        assert!(short.contains("rows "));
+        assert!(short.contains(
+            "q quit · j/k scroll · PgUp/PgDn · Home/End · 100%=1 core · ? unknown · ~ partial"
+        ));
+    }
+    let narrow = render(&s, 40, 12, &mut 0);
+    let help = narrow
+        .lines()
+        .find(|line| line.starts_with("q quit"))
+        .unwrap();
+    assert_eq!(help, "q quit · j/k scroll · PgUp/PgDn");
 }

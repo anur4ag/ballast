@@ -14,7 +14,7 @@ At 110 columns the fleet uses separate state, class, CPU, memory, age, tree labe
 The final ID column follows the longest fleet identifier, capped at 40 cells; labels use the remaining width.
 From 64 columns it combines workload labels and IDs; smaller terminals stack metrics.
 Agent and workload branches retain sibling continuations.
-Compact layouts separate sections with blank lines when the entire view fits; short terminals drop those gaps first.
+Layouts separate sections with blank lines when the entire view fits; short terminals drop those gaps first.
 Text clips at grapheme boundaries; full IDs remain available through `ps`.
 Memory and swap meters show used/total; a zero swap total displays `no swap`.
 

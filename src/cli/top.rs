@@ -451,10 +451,7 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
         .iter()
         .position(|line| line.to_string().starts_with("FLEET  "));
     let gaps = 1 + u16::from(fleet.is_some_and(|index| index > 0));
-    if (64..110).contains(&area.width)
-        && u32::from(header_height) + u32::from(count) + u32::from(gaps) + 3
-            <= u32::from(area.height)
-    {
+    if u32::from(header_height) + u32::from(count) + u32::from(gaps) + 3 <= u32::from(area.height) {
         if let Some(index) = fleet.filter(|index| *index > 0) {
             body.insert(index, Line::default());
         }
@@ -468,27 +465,39 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
         paragraph.scroll((*scroll, 0)),
         Rect::new(0, header_height, area.width, height),
     );
-    let footer = if area.width >= 110 {
-        vec![
-            Line::from("─".repeat(area.width as usize)),
-            Line::from(
-                "q quit  j/k scroll  PgUp/PgDn  Home/End · CPU: one core = 100% · ? unknown · ~ partial",
-            ),
-            Line::from(format!(
-                "ballast resume <id>|--all · ballast stop <id> · rows {}-{} / {count}",
-                scroll.saturating_add(1).min(count),
-                scroll.saturating_add(height).min(count)
-            )),
-        ]
-    } else {
-        vec![
-            Line::from("─".repeat(area.width as usize)),
-            Line::from(
-                "q quit  j/k scroll  g/G start/end · CPU 100%=1 core · ? unknown · ~ partial",
-            ),
-            Line::from("ballast resume <id>|--all · ballast stop <id>"),
-        ]
+    let fit = |items: &[&str]| {
+        let mut text = String::new();
+        for item in items {
+            let next = if text.is_empty() {
+                (*item).to_owned()
+            } else {
+                format!("{text} · {item}")
+            };
+            if !text.is_empty() && Line::from(next.as_str()).width() > area.width as usize {
+                break;
+            }
+            text = next;
+        }
+        Line::from(text)
     };
+    let rows = format!(
+        "rows {}-{} / {count}",
+        scroll.saturating_add(1).min(count),
+        scroll.saturating_add(height).min(count)
+    );
+    let footer = vec![
+        Line::from("─".repeat(area.width as usize)),
+        fit(&[
+            "q quit",
+            "j/k scroll",
+            "PgUp/PgDn",
+            "Home/End",
+            "100%=1 core",
+            "? unknown",
+            "~ partial",
+        ]),
+        fit(&["ballast resume <id>|--all", "ballast stop <id>", &rows]),
+    ];
     frame.render_widget(
         Paragraph::new(footer),
         Rect::new(
