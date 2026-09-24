@@ -12,7 +12,7 @@ root = Path(__file__).resolve().parent.parent
 binary = root/'target/release/ballast'
 with tempfile.TemporaryDirectory(prefix='blt-lat-', dir='/tmp') as temporary:
     home = Path(temporary)
-    (home/'config.toml').write_text('mode = "observe"\nrecovery_sweep_markers = []\n')
+    (home/'config.toml').write_text('mode = "observe"\nnotifications = false\nrecovery_sweep_markers = []\n')
     env = dict(os.environ, BALLAST_HOME=temporary)
     with (home/'daemon.stderr').open('w') as errors:
         daemon = subprocess.Popen([binary,'daemon'],env=env,stdout=subprocess.DEVNULL,stderr=errors)

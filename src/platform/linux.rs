@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::Instant;
 
 pub struct NativePlatform {
+    pub notifications: bool,
     cache: ProcessCache,
     page_size: u64,
     ticks: u64,
@@ -32,6 +33,7 @@ impl NativePlatform {
             Err(error) => return Err(error),
         };
         Ok(Self {
+            notifications: true,
             cache: ProcessCache::default(),
             page_size: page_size as u64,
             ticks: ticks as u64,
@@ -443,7 +445,7 @@ impl Platform for NativePlatform {
     fn notify(&self, title: &str, body: &str) -> io::Result<bool> {
         let mut command = Command::new("notify-send");
         command.args(["--", title, body]);
-        super::submit_notification(command)
+        super::submit_notification(command, self.notifications)
     }
 }
 

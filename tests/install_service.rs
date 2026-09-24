@@ -52,7 +52,7 @@ fn uninstall_recovers_when_the_loaded_services_plist_is_missing() {
     fs::create_dir_all(service.home.join(".ballast")).unwrap();
     fs::write(
         service.home.join(".ballast/config.toml"),
-        "mode = \"observe\"\nrecovery_sweep_markers = []\n",
+        "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = []\n",
     )
     .unwrap();
     let output = service.command("install").output().unwrap();

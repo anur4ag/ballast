@@ -689,6 +689,7 @@ fn daemon_fixture() {
     std::fs::write(
         paths.base.join("config.toml"),
         r#"mode = "observe"
+notifications = false
 recovery_sweep_markers = []
 [[markers]]
 key = "BALLAST_TEST_CLAUDE"

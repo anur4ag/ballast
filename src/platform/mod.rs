@@ -159,7 +159,10 @@ pub trait Platform {
 
 // Notification helpers may wait for a desktop bus. Reap them off the tick thread,
 // with a deadline so a missing desktop cannot accumulate stuck children.
-fn submit_notification(mut command: std::process::Command) -> io::Result<bool> {
+fn submit_notification(mut command: std::process::Command, enabled: bool) -> io::Result<bool> {
+    if !enabled {
+        return Ok(false);
+    }
     use std::process::Stdio;
     let mut child = match command
         .stdin(Stdio::null())
@@ -274,6 +277,12 @@ fn parse_environment(bytes: &[u8]) -> Option<Environment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_notifications_never_spawn_the_helper() {
+        let command = std::process::Command::new("invalid\0notification-helper");
+        assert!(!submit_notification(command, false).unwrap());
+    }
 
     #[test]
     fn parses_empty_environment() {

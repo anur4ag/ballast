@@ -68,7 +68,7 @@ impl DaemonGuard {
         let home = TempHome::new(tag);
         std::fs::write(
             home.path.join("config.toml"),
-            "mode = \"observe\"\nrecovery_sweep_markers = []\n",
+            "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = []\n",
         )
         .unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_ballast"))

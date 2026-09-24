@@ -40,7 +40,7 @@ impl TempHome {
         fs::write(
             path.join("config.toml"),
             format!(
-                "mode = \"observe\"\nrecovery_sweep_markers = [{marker:?}]\n\
+                "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = [{marker:?}]\n\
                  [[markers]]\nkey = {marker:?}\nlevel = \"agent\"\nkind = \"test\"\n"
             ),
         )

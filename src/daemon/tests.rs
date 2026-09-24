@@ -244,7 +244,7 @@ fn daemon_benchmark_fixture() {
     let paths = super::files::Paths::from_env().expect("BALLAST_HOME must be set");
     std::fs::write(
         paths.base.join("config.toml"),
-        "mode = \"observe\"\nrecovery_sweep_markers = []\n",
+        "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = []\n",
     )
     .unwrap();
     let watched: HashSet<ProcessIdentity> = std::env::var(BENCH_WATCH_ENV)

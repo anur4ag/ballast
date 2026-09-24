@@ -153,6 +153,7 @@ fn run_with_targets(
             env!("CARGO_PKG_VERSION")
         ))?;
         let mut platform = NativePlatform::new()?;
+        platform.notifications = config.notifications;
         let boot_id = platform.boot_id()?;
         recovery::recover(
             &paths,
@@ -527,6 +528,7 @@ pub fn resume_command(paths: &Paths, target: Option<&str>) -> io::Result<usize> 
     let _lock = ipc::lock(paths)?;
     let config = Config::load(paths).unwrap_or_default();
     let mut platform = NativePlatform::new()?;
+    platform.notifications = config.notifications;
     let mut log = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
     if target.is_none() {
         return recovery::recover(

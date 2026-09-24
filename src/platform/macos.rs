@@ -12,6 +12,7 @@ unsafe extern "C" {
 }
 
 pub struct NativePlatform {
+    pub notifications: bool,
     cache: ProcessCache,
     page_size: u64,
     arg_max: usize,
@@ -32,6 +33,7 @@ impl NativePlatform {
             return Err(invalid_data());
         }
         Ok(Self {
+            notifications: true,
             cache: ProcessCache::default(),
             page_size: page_size as u64,
             arg_max: arg_max as usize,
@@ -392,7 +394,7 @@ impl Platform for NativePlatform {
         let script = "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run";
         let mut command = Command::new("/usr/bin/osascript");
         command.args(["-e", script, "--", title, body]);
-        super::submit_notification(command)
+        super::submit_notification(command, self.notifications)
     }
 }
 

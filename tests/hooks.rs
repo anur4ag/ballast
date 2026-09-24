@@ -556,7 +556,7 @@ impl DaemonGuard {
         // suppresses acting on a freeze, not the admit/hold/deny path this test checks.
         std::fs::write(
             home.path.join("config.toml"),
-            format!("recovery_sweep_markers = []\n{config}"),
+            format!("notifications = false\nrecovery_sweep_markers = []\n{config}"),
         )
         .expect("write temp config.toml");
         let child = Command::new(env!("CARGO_BIN_EXE_ballast"))

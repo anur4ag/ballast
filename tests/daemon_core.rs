@@ -184,6 +184,7 @@ fn config_load_defaults_when_no_file_is_present() {
     assert!(matches!(config.mode, ballast::daemon::files::Mode::Enforce));
     assert_eq!(config.cleanup_grace_seconds, 30);
     assert!(config.recovery_sweep_markers.is_none());
+    assert!(config.notifications);
     assert_eq!(config.log_max_bytes, 5 * 1024 * 1024);
     assert_eq!(config.log_rotations, 3);
 }
@@ -191,9 +192,14 @@ fn config_load_defaults_when_no_file_is_present() {
 #[test]
 fn config_load_fills_defaults_for_fields_left_out() {
     let dir = TempDir::new("cfg-partial");
-    std::fs::write(dir.0.join("config.toml"), "mode = \"observe\"\n").expect("write config.toml");
+    std::fs::write(
+        dir.0.join("config.toml"),
+        "mode = \"observe\"\nnotifications = false\n",
+    )
+    .expect("write config.toml");
     let config = Config::load(&paths(&dir)).expect("load partial config");
     assert!(matches!(config.mode, ballast::daemon::files::Mode::Observe));
+    assert!(!config.notifications);
     assert_eq!(config.cleanup_grace_seconds, 30);
     assert_eq!(config.log_max_bytes, 5 * 1024 * 1024);
     assert_eq!(config.log_rotations, 3);

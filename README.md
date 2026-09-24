@@ -63,6 +63,7 @@ The optional `config.toml` currently accepts these defaults:
 
 ```toml
 mode = "enforce" # or "observe"
+notifications = true # false keeps notification decisions in the log without desktop delivery
 cleanup_grace_seconds = 30
 log_max_bytes = 5242880
 log_rotations = 3 # 1 through 10 archived files per log

@@ -455,6 +455,7 @@ fn native_ended_session_thaws_build_handler_and_preserves_then_stops_server() {
     }
     let mut group = Group(root);
     let mut platform = NativePlatform::new().unwrap();
+    platform.notifications = false;
     let mut attributor = Attributor::new(vec![], vec![]);
     let mut s = snapshot();
     let root_pid = group.0.id() as i32;

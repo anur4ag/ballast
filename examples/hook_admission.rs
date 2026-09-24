@@ -16,7 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     paths.prepare()?;
     let config = Config::load(&paths)?;
     let mut decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
-    let platform = NativePlatform::new()?;
+    let mut platform = NativePlatform::new()?;
+    platform.notifications = false;
     let mut snapshot = Snapshot {
         status: Status {
             daemon_version: "admission-probe".into(),

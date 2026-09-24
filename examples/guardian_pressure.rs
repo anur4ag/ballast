@@ -119,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         root: std::process::id() as i32,
         owned: HashSet::new(),
     };
+    platform.native.notifications = false;
     let boot_id = platform.boot_id()?;
     let mut guardian = Guardian::new(paths, boot_id.clone(), Mode::Enforce, config.pressure);
     let mut attributor = Attributor::new(Vec::new(), Vec::new());
