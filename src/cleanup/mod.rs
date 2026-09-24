@@ -37,6 +37,7 @@ struct Termination {
     automatic: bool,
     members: HashMap<ProcessIdentity, (Option<Instant>, bool)>,
     memory: HashMap<ProcessIdentity, u64>,
+    attempted: HashMap<ProcessIdentity, Instant>,
     description: Work,
 }
 
@@ -227,6 +228,7 @@ impl Cleanup {
                 automatic,
                 members: HashMap::new(),
                 memory: HashMap::new(),
+                attempted: HashMap::new(),
                 description,
             });
     }
@@ -406,6 +408,9 @@ impl Cleanup {
                 platform.process_liveness(*id) != ProcessLiveness::Gone
                     && (!termination.automatic || members.contains(id))
             });
+            termination
+                .attempted
+                .retain(|id, _| termination.members.contains_key(id));
             // The workload record survives provisional attribution and omitted rows.
             // Keep accepted user intent even before any member could be selected.
             if !termination.members.is_empty() || (!termination.automatic && workload.is_some()) {
@@ -468,6 +473,7 @@ impl Cleanup {
             let mut targets: Vec<_> = targets.into_iter().collect();
             targets.sort_unstable_by_key(|id| (workload.is_none_or(|w| w.root != *id), *id));
             for id in targets {
+                termination.attempted.entry(id).or_insert(now);
                 if let Some(&(Some(sent), killed)) = termination.members.get(&id) {
                     if !killed
                         && now.saturating_duration_since(sent) >= Duration::from_secs(5)
@@ -500,19 +506,39 @@ impl Cleanup {
             .sessions
             .iter()
             .filter(|(id, session)| {
+                let pending: Vec<_> = self
+                    .pending
+                    .values()
+                    .filter(|t| matches!(self.mode, Mode::Enforce) && &t.agent_id == *id)
+                    .collect();
                 !session.notified
-                    && (!session.reclaimed.is_empty() || !session.services.is_empty())
-                    && (matches!(self.mode, Mode::Observe)
-                        || !self.pending.values().any(|t| &t.agent_id == *id))
+                    && (!session.reclaimed.is_empty()
+                        || !session.services.is_empty()
+                        || !pending.is_empty())
+                    && pending.iter().all(|t| {
+                        !t.members.is_empty()
+                            && t.members.keys().all(|member| {
+                                t.attempted.get(member).is_some_and(|attempted| {
+                                    now.saturating_duration_since(*attempted)
+                                        >= Duration::from_secs(30)
+                                })
+                            })
+                    })
             })
             .map(|(id, _)| id.clone())
             .collect();
         ready.sort_unstable();
         for id in ready {
             let session = &self.sessions[&id];
-            let reclaimed = !session.reclaimed.is_empty();
+            let mut pending: Vec<_> = self
+                .pending
+                .values()
+                .filter(|t| matches!(self.mode, Mode::Enforce) && t.agent_id == id)
+                .collect();
+            pending.sort_unstable_by_key(|t| &t.workload_id);
+            let cleanup = !session.reclaimed.is_empty() || !pending.is_empty();
             let services = !session.services.is_empty();
-            if (reclaimed && !self.can_notify("reclaimed", now))
+            if (cleanup && !self.can_notify("reclaimed", now))
                 || (services && !self.can_notify("services", now))
             {
                 continue;
@@ -521,17 +547,27 @@ impl Cleanup {
                 .reclaimed
                 .values()
                 .chain(session.services.values())
+                .chain(pending.iter().map(|t| &t.description))
                 .next()
                 .unwrap();
-            let body = notifications::cleanup(
+            let mut body = notifications::cleanup(
                 &work.agent,
                 session.ended,
                 &session.reclaimed.values().cloned().collect::<Vec<_>>(),
                 &session.services.values().cloned().collect::<Vec<_>>(),
             );
+            for termination in pending {
+                if !body.is_empty() {
+                    body.push_str(" · ");
+                }
+                body.push_str(&notifications::unstopped(
+                    &termination.description,
+                    termination.members.len(),
+                ));
+            }
             let ended = session.ended;
             self.notify(
-                if reclaimed { "reclaimed" } else { "services" },
+                if cleanup { "reclaimed" } else { "services" },
                 &body,
                 now,
                 platform,

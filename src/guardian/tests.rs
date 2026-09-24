@@ -2256,3 +2256,173 @@ fn max_freeze_notifications_ignore_the_per_minute_limit() {
 
 #[path = "review_tests.rs"]
 mod review_tests;
+
+mod episode_cooldown {
+    use super::*;
+
+    fn paused(platform: &FakePlatform) -> usize {
+        platform
+            .notifications()
+            .iter()
+            .filter(|(_, body)| body.starts_with("Paused"))
+            .count()
+    }
+
+    // A second pressure episode whose first freeze lands inside the 60 s "freeze" cooldown
+    // gets no notification for that freeze, yet episode_notified is still set, so a later
+    // freeze in the same episode (after the cooldown) stays silent as well.
+    #[test]
+    fn second_episode_announces_after_the_cooldown_expires() {
+        let home = TestHome::new("episode-probe");
+        let mut guardian = Guardian::new(
+            home.0.clone(),
+            "boot-1".into(),
+            Mode::Enforce,
+            Thresholds::default(),
+        );
+        let mut platform = FakePlatform::new("boot-1");
+        let mut attributor = Attributor::new(Vec::new(), Vec::new());
+        let mut log = home.log();
+        let (mut now, mut step) =
+            warm_to_critical(&mut guardian, &mut platform, &mut attributor, &mut log);
+
+        let agent_root = id(300, 1);
+        let first = id(301, 1);
+        let second = id(302, 1);
+        let mut one = AttributionSnapshot::default();
+        one.agents.push(agent("a:3", agent_root, 6 * GIB));
+        one.workloads.push(workload(
+            "w:first",
+            "a:3",
+            first,
+            WorkloadClass::Batch,
+            0,
+            GIB,
+            Some(1000),
+        ));
+        one.processes
+            .push(workload_attribution(first, "a:3", "w:first"));
+        let mut two = one.clone();
+        two.workloads.push(workload(
+            "w:second",
+            "a:3",
+            second,
+            WorkloadClass::Batch,
+            1,
+            GIB,
+            Some(1000),
+        ));
+        two.processes
+            .push(workload_attribution(second, "a:3", "w:second"));
+        let processes = vec![
+            process(first, agent_root.pid, GIB),
+            process(second, agent_root.pid, GIB),
+        ];
+
+        // Episode one: freeze and notify at T.
+        now += Duration::from_secs(1);
+        step += 1;
+        let t = now;
+        guardian
+            .tick(
+                t,
+                &snapshot(Some(heavy_swap(step)), one.clone(), processes.clone()),
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .unwrap();
+        assert_eq!(guardian.frozen.len(), 1);
+        assert_eq!(paused(&platform), 1, "episode one notifies");
+
+        // Pressure returns to Normal; the frozen workload resumes (episode one ends).
+        now = cool_to_normal(
+            &mut guardian,
+            &mut platform,
+            &mut attributor,
+            &mut log,
+            now + Duration::from_secs(1),
+        );
+        assert!(guardian.frozen.is_empty(), "resumed at Normal");
+        while now < t + Duration::from_secs(47) {
+            now += Duration::from_secs(5);
+            guardian
+                .tick(
+                    now,
+                    &quiet_normal_snapshot(),
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        assert_eq!(guardian.level, Level::Normal);
+
+        // Episode two warms up and freezes at about T+51, inside the 60 s cooldown.
+        for _ in 0..3 {
+            now += Duration::from_secs(1);
+            step += 1;
+            guardian
+                .tick(
+                    now,
+                    &snapshot(
+                        Some(heavy_swap(step)),
+                        AttributionSnapshot::default(),
+                        Vec::new(),
+                    ),
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        assert_eq!(guardian.level, Level::Critical);
+        now += Duration::from_secs(1);
+        step += 1;
+        guardian
+            .tick(
+                now,
+                &snapshot(Some(heavy_swap(step)), one.clone(), processes.clone()),
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .unwrap();
+        assert_eq!(guardian.frozen.len(), 1, "episode two froze w:first");
+        assert!(now < t + Duration::from_secs(60));
+        let silent_first = paused(&platform);
+
+        // Past the cooldown, a second eligible workload appears and freezes at about T+62.
+        while now < t + Duration::from_secs(61) {
+            now += Duration::from_secs(1);
+            step += 1;
+            guardian
+                .tick(
+                    now,
+                    &snapshot(Some(heavy_swap(step)), one.clone(), processes.clone()),
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        now += Duration::from_secs(1);
+        step += 1;
+        guardian
+            .tick(
+                now,
+                &snapshot(Some(heavy_swap(step)), two.clone(), processes.clone()),
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .unwrap();
+        assert_eq!(guardian.frozen.len(), 2, "episode two froze w:second too");
+        assert_eq!(
+            paused(&platform),
+            2,
+            "episode two never announced a pause (first freeze inside cooldown: {} notifications)",
+            silent_first
+        );
+    }
+}

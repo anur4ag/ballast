@@ -493,14 +493,13 @@ impl Guardian {
         self.record(log, "freeze", serde_json::json!({"workload_id": victim.id}));
         if !self.episode_notified {
             let description = crate::notifications::Work::from_snapshot(snapshot, victim);
-            self.notify(
+            self.episode_notified = self.notify(
                 "freeze",
                 &crate::notifications::paused(&description),
                 now,
                 platform,
                 log,
             );
-            self.episode_notified = true;
         }
         Ok(())
     }
@@ -730,21 +729,27 @@ impl Guardian {
         now: Instant,
         platform: &impl Platform,
         log: &mut RotatingLog,
-    ) {
+    ) -> bool {
         if kind != "max_freeze"
             && self
                 .notifications
                 .get(kind)
                 .is_some_and(|then| now.saturating_duration_since(*then) < Duration::from_secs(60))
         {
-            return;
+            return false;
         }
         self.notifications.insert(kind, now);
         self.decision(log, "notify", serde_json::json!({"mode": self.mode, "kind": kind, "message": body, "evidence": self.evidence}));
         if matches!(self.mode, Mode::Enforce) {
-            if let Err(e) = platform.notify("Ballast", body) {
-                self.errors.push(format!("notification ({kind}): {e}"));
+            match platform.notify("Ballast", body) {
+                Ok(delivered) => delivered,
+                Err(e) => {
+                    self.errors.push(format!("notification ({kind}): {e}"));
+                    false
+                }
             }
+        } else {
+            true
         }
     }
 }

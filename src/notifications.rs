@@ -185,3 +185,17 @@ pub(crate) fn sample() -> String {
         })
     )
 }
+
+pub(crate) fn unstopped(work: &Work, count: usize) -> String {
+    format!(
+        "{} could not be stopped · `{}` ({}){}",
+        crate::cli::count(count, "leftover process", "leftover processes"),
+        work.label,
+        work.agent,
+        if work.handle.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", work.handle)
+        }
+    )
+}

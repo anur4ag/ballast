@@ -15,6 +15,8 @@ struct Fake {
     signals: RefCell<Vec<(ProcessIdentity, String)>>,
     notifications: RefCell<Vec<String>>,
     gone: HashSet<ProcessIdentity>,
+    denied: HashSet<ProcessIdentity>,
+    attempts: RefCell<Vec<ProcessIdentity>>,
     unknown: HashSet<ProcessIdentity>,
     fail: RefCell<bool>,
     exit_during_signal: bool,
@@ -56,6 +58,10 @@ impl Platform for Fake {
         }
     }
     fn send_signal(&self, id: ProcessIdentity, signal: Signal) -> io::Result<()> {
+        self.attempts.borrow_mut().push(id);
+        if self.denied.contains(&id) {
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
+        }
         if self.exit_during_signal {
             return Err(io::Error::from_raw_os_error(libc::ESRCH));
         }
@@ -960,4 +966,46 @@ fn exit_between_observation_and_signal_is_not_a_cleanup_error() {
         errors.is_empty(),
         "confirmed signal-time exits are not errors: {errors:?}"
     );
+}
+
+#[test]
+fn denied_member_bounds_the_summary_wait_without_stopping_retries() {
+    let mut h = Harness::new(Mode::Enforce);
+    let mut s = snapshot();
+    let mut p = Fake::default();
+    p.denied.insert(id(21));
+    let now = Instant::now();
+    h.tick(now, &s, &p);
+    p.gone.extend([id(20), id(40)]);
+    s.attribution
+        .processes
+        .retain(|a| !p.gone.contains(&a.identity));
+    s.processes
+        .retain(|p| p.identity != id(20) && p.identity != id(40));
+    h.tick(now + Duration::from_secs(29), &s, &p);
+    assert!(p.notifications.borrow().is_empty());
+    h.tick(now + Duration::from_secs(30), &s, &p);
+    assert_eq!(p.notifications.borrow().len(), 1);
+    let body = p.notifications.borrow()[0].clone();
+    assert!(
+        body.contains("1 leftover process could not be stopped"),
+        "{body}"
+    );
+    assert!(!body.contains("1 leftover processes"));
+    assert!(
+        body.contains(WorkloadHandles::for_snapshot(&s).get("batch")),
+        "{body}"
+    );
+    assert!(
+        body.contains("8080") && body.contains("ballast stop "),
+        "{body}"
+    );
+    let attempts = p.attempts.borrow().len();
+    h.tick(now + Duration::from_secs(31), &s, &p);
+    assert!(
+        p.attempts.borrow().len() > attempts,
+        "failed signals still retry"
+    );
+    assert_eq!(h.cleanup.pending_targets(), ["batch"]);
+    assert_eq!(p.notifications.borrow().len(), 1);
 }
