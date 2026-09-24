@@ -7,7 +7,12 @@ tmux=['tmux','-L','ballast-t09-perf']
 def tm(*a):return sp.check_output(tmux+list(a),text=True)
 def cpu_rss(pid):
  fields=sp.check_output(['ps','-p',str(pid),'-o','time=,rss='],text=True).split();parts=list(map(float,fields[0].split(':')))
- return sum(v*60**i for i,v in enumerate(reversed(parts))),int(fields[1])/1024
+ cpu=sum(v*60**i for i,v in enumerate(reversed(parts)))
+ stat=pathlib.Path('/proc')/str(pid)/'stat'
+ if stat.exists():
+  counters=stat.read_text().rsplit(') ',1)[1].split()
+  cpu=(int(counters[11])+int(counters[12]))/os.sysconf('SC_CLK_TCK')
+ return cpu,int(fields[1])/1024
 try:
  for _ in range(100):
   if pathlib.Path(home,'run/ballastd.sock').exists():break
