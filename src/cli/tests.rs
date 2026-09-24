@@ -208,6 +208,7 @@ fn cpu_deltas_reset_on_gaps_missing_samples_and_pid_reuse() {
         pgid: 100,
         uid: 1,
         stopped: false,
+        name: None,
         exe: None,
         argv: None,
         metrics: Some(ProcessMetrics {
@@ -259,6 +260,7 @@ fn top_projection_keeps_machine_totals_and_only_fleet_metrics() {
             pgid: pid,
             uid: 1,
             stopped: false,
+            name: None,
             exe: Some("fixture".into()),
             argv: Some(vec!["private".into()]),
             metrics: Some(ProcessMetrics {

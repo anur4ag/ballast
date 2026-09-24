@@ -123,7 +123,8 @@ fn queued_returns_the_loops_reply_while_the_client_stays_connected_and_pipelines
     let (reader, mut client) = pair();
     let (requests_tx, requests_rx) = mpsc::sync_channel(4);
 
-    let handle = thread::spawn(move || queued(Method::Gc, &reader, &requests_tx));
+    let handle =
+        thread::spawn(move || queued(Method::Gc, Default::default(), &reader, &requests_tx));
     let pending = requests_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("pending request");
@@ -158,7 +159,12 @@ fn queued_cancels_promptly_on_a_plain_disconnect() {
 
     let (done_tx, done_rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = done_tx.send(queued(Method::Gc, &reader, &requests_tx));
+        let _ = done_tx.send(queued(
+            Method::Gc,
+            Default::default(),
+            &reader,
+            &requests_tx,
+        ));
     });
     let response = done_rx
         .recv_timeout(Duration::from_secs(2))
@@ -172,7 +178,12 @@ fn queued_cancels_promptly_when_a_pipelined_second_request_is_left_unread_after_
     let (requests_tx, requests_rx) = mpsc::sync_channel(4);
     let (done_tx, done_rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = done_tx.send(queued(Method::Gc, &reader, &requests_tx));
+        let _ = done_tx.send(queued(
+            Method::Gc,
+            Default::default(),
+            &reader,
+            &requests_tx,
+        ));
     });
 
     // Wait for queued() to actually be holding, then pipeline a second

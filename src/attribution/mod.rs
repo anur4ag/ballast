@@ -216,6 +216,7 @@ impl Attributor {
                 pgid: cached.pgid,
                 uid: cached.uid,
                 stopped: false,
+                name: None,
                 exe: None,
                 argv: None,
                 metrics: None,

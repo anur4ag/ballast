@@ -12,10 +12,10 @@ impl Classifier {
         )
     }
     pub fn heavy(&self, command: &str) -> bool {
-        let Some(segments) = segments(command) else {
+        let Some(segments) = pipelines(command, false) else {
             return false;
         };
-        segments.iter().any(|words| {
+        segments.iter().flatten().any(|words| {
             let mut words = words.as_slice();
             while words
                 .first()
@@ -35,7 +35,7 @@ impl Classifier {
         })
     }
 }
-fn assignment(word: &str) -> bool {
+pub(super) fn assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(key, _)| {
         !key.is_empty()
             && key
@@ -46,8 +46,9 @@ fn assignment(word: &str) -> bool {
 }
 // ponytail: literal shell segments only; heredocs and shell -c bodies stay light.
 // Use a full shell parser if classification of dynamic commands becomes necessary.
-fn segments(command: &str) -> Option<Vec<Vec<String>>> {
+pub(super) fn pipelines(command: &str, literal: bool) -> Option<Vec<Vec<Vec<String>>>> {
     let mut result = Vec::new();
+    let mut pipeline = Vec::new();
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
@@ -58,6 +59,9 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
             '\\' if quote != Some('\'') => {
                 let escaped = chars.next()?;
                 if escaped != '\n' {
+                    if quote == Some('"') && !matches!(escaped, '$' | '`' | '\\' | '"') {
+                        word.push('\\');
+                    }
                     word.push(escaped);
                     active = true;
                 }
@@ -67,7 +71,11 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
                 active = true;
             }
             ch if quote == Some(ch) => quote = None,
+            '$' | '`' if literal && quote != Some('\'') => return None,
             ch if quote.is_some() => word.push(ch),
+            '<' | '>' | '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}' | '~' if literal => {
+                return None;
+            }
             '<' if chars.peek() == Some(&'<') => return None,
             '#' if !active => {
                 for ch in chars.by_ref() {
@@ -76,7 +84,10 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
                     }
                 }
                 if !words.is_empty() {
-                    result.push(std::mem::take(&mut words));
+                    pipeline.push(std::mem::take(&mut words));
+                }
+                if !pipeline.is_empty() {
+                    result.push(std::mem::take(&mut pipeline));
                 }
             }
             ';' | '|' | '&' | '\n' | '(' | ')' => {
@@ -85,7 +96,15 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
                     active = false;
                 }
                 if !words.is_empty() {
-                    result.push(std::mem::take(&mut words));
+                    pipeline.push(std::mem::take(&mut words));
+                }
+                if ch != '|' || chars.peek() == Some(&'|') {
+                    if !pipeline.is_empty() {
+                        result.push(std::mem::take(&mut pipeline));
+                    }
+                    if ch == '|' {
+                        chars.next();
+                    }
                 }
             }
             ch if ch.is_whitespace() => {
@@ -107,7 +126,10 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
         words.push(word);
     }
     if !words.is_empty() {
-        result.push(words);
+        pipeline.push(words);
+    }
+    if !pipeline.is_empty() {
+        result.push(pipeline);
     }
     Some(result)
 }

@@ -64,7 +64,7 @@ The `status` object always contains the fields below.
 | `status` | Status object described above |
 | `boot_id` | Opaque OS boot string; pair with process identities before comparing across snapshots |
 | `capabilities` | Boolean keys: `environment`, `listening_ports`, `memory_footprint`, `memory_psi`, `kernel_pressure`, `notifications`, `atomic_signals` |
-| `processes` | Process records: `identity`, `ppid`, `pgid`, `uid`, `stopped`, nullable `exe`, nullable `argv`, nullable `metrics` |
+| `processes` | Process records: `identity`, `ppid`, `pgid`, `uid`, `stopped`, nullable `name`, nullable `exe`, nullable `argv`, nullable `metrics` |
 | `changes` | `started`, `exited`, `exec_changed` arrays of process identities |
 | `pressure` | Raw pressure inputs or null |
 | `attribution` | `owners`, `agents`, `workloads`, `processes` arrays described below |

@@ -116,6 +116,7 @@ pub(crate) fn top_snapshot(snapshot: &Snapshot) -> Snapshot {
 /// The loop can retain the reply sender for admission without blocking itself.
 pub struct PendingRequest {
     pub method: Method,
+    pub evidence: crate::hooks::HookEvidence,
     pub reply: mpsc::Sender<Response>,
     pub cancelled: Arc<AtomicBool>,
 }
@@ -235,6 +236,34 @@ fn bind(paths: &Paths, lock: &File) -> io::Result<(UnixListener, (u64, u64))> {
     Ok((listener, socket_identity(paths)?))
 }
 
+/// Kernel-supplied peer identity, never a PID claimed in a hook payload.
+pub fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    let (level, option, mut value) = (libc::SOL_SOCKET, libc::SO_PEERCRED, unsafe {
+        std::mem::zeroed::<libc::ucred>()
+    });
+    #[cfg(target_os = "macos")]
+    let (level, option, mut value) = (libc::SOL_LOCAL, libc::LOCAL_PEERPID, 0 as libc::pid_t);
+    let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            level,
+            option,
+            std::ptr::addr_of_mut!(value).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || length as usize != std::mem::size_of_val(&value) {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    let pid = value.pid;
+    #[cfg(target_os = "macos")]
+    let pid = value;
+    (pid > 0).then_some(pid)
+}
+
 fn serve(
     stream: UnixStream,
     published: Published,
@@ -243,6 +272,7 @@ fn serve(
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let peer = peer_pid(&stream);
     let mut reader = BufReader::new(stream);
     let mut line = Vec::with_capacity(4096);
     loop {
@@ -269,7 +299,20 @@ fn serve(
                         snapshot: Arc::new(top_snapshot(&snapshot)),
                     })
                 }
-                method => queued(method, &reader, &requests),
+                method => {
+                    let evidence = if let Method::Hook { payload } = &method {
+                        serde_json::from_value::<crate::hooks::HookRequest>(payload.clone())
+                            .ok()
+                            .map(|hook| {
+                                let snapshot = Arc::clone(&published.read().unwrap());
+                                crate::hooks::lookup(&hook, &snapshot, peer)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Default::default()
+                    };
+                    queued(method, evidence, &reader, &requests)
+                }
             },
         };
         write_message(reader.get_mut(), &response)?;
@@ -277,6 +320,7 @@ fn serve(
 }
 fn queued(
     method: Method,
+    evidence: crate::hooks::HookEvidence,
     reader: &BufReader<UnixStream>,
     requests: &SyncSender<PendingRequest>,
 ) -> Response {
@@ -285,6 +329,7 @@ fn queued(
     if requests
         .try_send(PendingRequest {
             method,
+            evidence,
             reply,
             cancelled: cancelled.clone(),
         })

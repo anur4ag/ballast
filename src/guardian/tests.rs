@@ -187,6 +187,7 @@ fn process(identity: ProcessIdentity, ppid: i32, memory_bytes: u64) -> Process {
         pgid: identity.pid,
         uid: own_uid(),
         stopped: false,
+        name: None,
         exe: Some("/usr/bin/fake-workload".into()),
         argv: Some(vec!["fake-workload".into()]),
         metrics: Some(ProcessMetrics {
@@ -1861,11 +1862,13 @@ fn late_children_are_persisted_before_their_own_stop_signal() {
     // recognized "claude" binary (see `markers.toml`'s `root_binaries`); a generic exe leaves
     // the root unconfirmed and the root process falls back to starting its own bogus workload.
     let claude_root_process = |identity: ProcessIdentity| Process {
+        name: None,
         exe: Some("/usr/bin/claude".into()),
         argv: Some(Vec::new()),
         ..process(identity, 1, 0)
     };
     let workload_shell_process = |identity: ProcessIdentity, ppid: i32| Process {
+        name: None,
         exe: Some("/bin/bash".into()),
         argv: Some(vec!["bash".into(), "-c".into(), "long-build".into()]),
         ..process(identity, ppid, GIB)
