@@ -586,6 +586,7 @@ fn resume_preserves_an_unreadable_identity_and_drops_a_confirmed_mismatch() {
         &recovery_home.0,
         &mut recovery_platform,
         &[],
+        None,
         &mut recovery_log,
     );
     assert!(

@@ -183,6 +183,7 @@ fn config_load_defaults_when_no_file_is_present() {
     let config = Config::load(&paths(&dir)).expect("load default config");
     assert!(matches!(config.mode, ballast::daemon::files::Mode::Enforce));
     assert_eq!(config.cleanup_grace_seconds, 30);
+    assert!(config.recovery_sweep_markers.is_none());
     assert_eq!(config.log_max_bytes, 5 * 1024 * 1024);
     assert_eq!(config.log_rotations, 3);
 }
@@ -204,6 +205,10 @@ fn config_load_rejects_invalid_toml_and_out_of_range_values() {
         ("mode = 123\n", "wrong type for mode"),
         ("cleanup_grace_seconds = -1\n", "negative cleanup grace"),
         ("unknown_field = 1\n", "unknown field"),
+        (
+            "recovery_sweep_markers = [\"UNREGISTERED\"]\n",
+            "unknown recovery marker",
+        ),
         ("log_max_bytes = 0\n", "zero log_max_bytes"),
         ("log_rotations = 0\n", "log_rotations below range"),
         ("log_rotations = 11\n", "log_rotations above range"),

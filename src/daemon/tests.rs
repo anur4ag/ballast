@@ -242,7 +242,11 @@ fn daemon_benchmark_fixture() {
     use std::collections::HashSet;
 
     let paths = super::files::Paths::from_env().expect("BALLAST_HOME must be set");
-    std::fs::write(paths.base.join("config.toml"), "mode = \"observe\"\n").unwrap();
+    std::fs::write(
+        paths.base.join("config.toml"),
+        "mode = \"observe\"\nrecovery_sweep_markers = []\n",
+    )
+    .unwrap();
     let watched: HashSet<ProcessIdentity> = std::env::var(BENCH_WATCH_ENV)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<ProcessIdentity>>(&json).ok())

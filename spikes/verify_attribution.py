@@ -39,6 +39,8 @@ def stop(process):
 def main():
     with tempfile.TemporaryDirectory(prefix='blt-real-', dir='/tmp') as directory:
         base = Path(directory)
+        (base / 'daemon').mkdir()
+        (base / 'daemon/config.toml').write_text('mode = "observe"\nrecovery_sweep_markers = []\n')
         daemon_env = os.environ.copy()
         daemon_env['BALLAST_HOME'] = str(base / 'daemon')
         daemon = subprocess.Popen([str(BINARY), 'daemon'], env=daemon_env,

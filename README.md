@@ -68,6 +68,10 @@ log_max_bytes = 5242880
 log_rotations = 3 # 1 through 10 archived files per log
 ```
 
+Recovery sweeps all built-in and custom marker keys by default.
+Set `recovery_sweep_markers = ["MY_AGENT_KEY"]` to limit the stopped-process sweep to registered keys, or `[]` to disable it.
+Journaled processes are recovered regardless of this setting.
+
 IPC uses newline-delimited JSON over `run/ballastd.sock` (protocol version 1).
 For example, `{"version":1,"method":"status"}` returns `{"version":1,"type":"status","status":{...}}`.
 `snapshot`, `ps`, and `top` return `type: "snapshot"` with a `snapshot` containing status, capabilities, boot identity, processes, process changes, and raw pressure inputs.

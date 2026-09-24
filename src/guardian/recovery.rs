@@ -70,6 +70,7 @@ pub fn recover(
     paths: &Paths,
     platform: &mut impl Platform,
     markers: &[Marker],
+    sweep_keys: Option<&[String]>,
     log: &mut RotatingLog,
 ) -> io::Result<usize> {
     let boot_id = platform.boot_id()?;
@@ -118,6 +119,7 @@ pub fn recover(
                     builtins
                         .iter()
                         .chain(markers)
+                        .filter(|m| sweep_keys.is_none_or(|keys| keys.contains(&m.key)))
                         .any(|m| env.get(&m.key).is_some_and(|v| !v.is_empty()))
                 });
                 if marked {

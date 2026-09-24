@@ -74,6 +74,7 @@ pub struct Config {
     pub cleanup_grace_seconds: u64,
     pub pressure: crate::guardian::Thresholds,
     pub markers: Vec<crate::attribution::Marker>,
+    pub recovery_sweep_markers: Option<Vec<String>>,
     pub shells: Vec<String>,
     pub heavy_commands: Vec<String>,
     pub log_max_bytes: u64,
@@ -86,6 +87,7 @@ impl Default for Config {
             cleanup_grace_seconds: 30,
             pressure: crate::guardian::Thresholds::default(),
             markers: Vec::new(),
+            recovery_sweep_markers: None,
             shells: Vec::new(),
             heavy_commands: Vec::new(),
             log_max_bytes: 5 * 1024 * 1024,
@@ -123,6 +125,16 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "markers must have valid, unique keys and agent kinds",
+            ));
+        }
+        if config
+            .recovery_sweep_markers
+            .as_ref()
+            .is_some_and(|selected| selected.iter().any(|key| !keys.contains(key)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "recovery_sweep_markers must name built-in or custom marker keys",
             ));
         }
         if config

@@ -554,7 +554,11 @@ impl DaemonGuard {
         // because the ambient host happens to be under ("Critical") pressure while this
         // test runs. Admission's own decisions are unaffected -- observe mode only
         // suppresses acting on a freeze, not the admit/hold/deny path this test checks.
-        std::fs::write(home.path.join("config.toml"), config).expect("write temp config.toml");
+        std::fs::write(
+            home.path.join("config.toml"),
+            format!("recovery_sweep_markers = []\n{config}"),
+        )
+        .expect("write temp config.toml");
         let child = Command::new(env!("CARGO_BIN_EXE_ballast"))
             .arg("daemon")
             .env("BALLAST_HOME", &home.path)

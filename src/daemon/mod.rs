@@ -154,7 +154,13 @@ fn run_with_targets(
         ))?;
         let mut platform = NativePlatform::new()?;
         let boot_id = platform.boot_id()?;
-        recovery::recover(&paths, &mut platform, &config.markers, &mut decisions)?;
+        recovery::recover(
+            &paths,
+            &mut platform,
+            &config.markers,
+            config.recovery_sweep_markers.as_deref(),
+            &mut decisions,
+        )?;
         loaded_config?;
         Ok((server, decisions, platform, boot_id))
     })()
@@ -523,7 +529,13 @@ pub fn resume_command(paths: &Paths, target: Option<&str>) -> io::Result<usize> 
     let mut platform = NativePlatform::new()?;
     let mut log = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
     if target.is_none() {
-        return recovery::recover(paths, &mut platform, &config.markers, &mut log);
+        return recovery::recover(
+            paths,
+            &mut platform,
+            &config.markers,
+            config.recovery_sweep_markers.as_deref(),
+            &mut log,
+        );
     }
     let boot_id = platform.boot_id()?;
     let saved = recovery::read(paths)?;

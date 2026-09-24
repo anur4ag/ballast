@@ -20,6 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// daemon spawned against it can never freeze anything for real (see the module doc comment).
 struct TempHome {
     path: PathBuf,
+    marker: String,
 }
 impl TempHome {
     fn new(tag: &str) -> Self {
@@ -35,9 +36,16 @@ impl TempHome {
             "test home path must stay short for the unix socket path limit: {path:?}"
         );
         fs::create_dir_all(&path).expect("create temp BALLAST_HOME");
-        fs::write(path.join("config.toml"), "mode = \"observe\"\n")
-            .expect("write observe-mode config.toml");
-        TempHome { path }
+        let marker = format!("BALLAST_RECOVERY_{}", unique.replace('-', "_"));
+        fs::write(
+            path.join("config.toml"),
+            format!(
+                "mode = \"observe\"\nrecovery_sweep_markers = [{marker:?}]\n\
+                 [[markers]]\nkey = {marker:?}\nlevel = \"agent\"\nkind = \"test\"\n"
+            ),
+        )
+        .expect("write isolated observe-mode config.toml");
+        TempHome { path, marker }
     }
     fn frozen_json_path(&self) -> PathBuf {
         self.path.join("state").join("frozen.json")
@@ -131,7 +139,7 @@ fn wait_resumed(pid: i32) {
 }
 
 /// A re-exec of this test binary into `idle_fixture`, with a cleared environment plus
-/// `BALLAST_OWNER`, so the daemon's independent stopped-process marker sweep can find it -- never
+/// a unique marker key, so the daemon's independent stopped-process marker sweep can find it -- never
 /// a real user's process. Deliberately not `Command::new("sleep")`: a hardened-runtime system
 /// binary like `/bin/sleep` rejects `read_environment` for a caller that did not spawn it as a
 /// direct exec target of *its own* privileged path, which the sweep depends on; a locally built
@@ -140,11 +148,11 @@ fn wait_resumed(pid: i32) {
 /// restriction.
 struct OwnedSleep(Child);
 impl OwnedSleep {
-    fn spawn(tag: &str) -> Self {
+    fn spawn(marker: &str) -> Self {
         let child = Command::new(std::env::current_exe().expect("current_exe"))
             .args(["idle_fixture", "--exact", "--ignored", "--nocapture"])
             .env_clear()
-            .env("BALLAST_OWNER", format!("guardian-recovery-test-{tag}"))
+            .env(marker, "guardian-recovery-test")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -313,7 +321,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
 
     // 1. A valid journal naming a real stopped process under the current boot: recovered via
     // the journal itself.
-    let valid = OwnedSleep::spawn("valid");
+    let valid = OwnedSleep::spawn(&home.marker);
     valid.stop();
     home.write_frozen_json(
         &boot,
@@ -331,7 +339,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
 
     // 2. A corrupt journal: unreadable, but the independent stopped-marker sweep must still
     // run and find this owned, stopped, marked process regardless.
-    let corrupt = OwnedSleep::spawn("corrupt");
+    let corrupt = OwnedSleep::spawn(&home.marker);
     corrupt.stop();
     fs::write(home.frozen_json_path(), b"{ this is not valid json").expect("corrupt frozen.json");
     daemon.kill();
@@ -345,7 +353,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
     );
 
     // 3. A missing journal entirely: same guarantee, via the same independent sweep.
-    let missing = OwnedSleep::spawn("missing");
+    let missing = OwnedSleep::spawn(&home.marker);
     missing.stop();
     match fs::remove_file(home.frozen_json_path()) {
         Ok(()) | Err(_) => {}
@@ -365,7 +373,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
 #[test]
 fn a_journal_entry_from_a_different_boot_is_discarded_but_the_marker_sweep_still_runs() {
     let home = TempHome::new("boot-mismatch");
-    let stray = OwnedSleep::spawn("boot-mismatch");
+    let stray = OwnedSleep::spawn(&home.marker);
     stray.stop();
     let unmarked = BareSleep::spawn();
     unmarked.stop();
@@ -434,7 +442,7 @@ fn a_stale_journal_entry_whose_identity_no_longer_matches_is_never_signalled() {
 fn cli_offline_resume_recovers_directly_when_no_daemon_is_reachable() {
     let home = TempHome::new("cli-offline");
     let boot = current_boot_id();
-    let owned = OwnedSleep::spawn("cli-offline");
+    let owned = OwnedSleep::spawn(&home.marker);
     owned.stop();
     home.write_frozen_json(
         &boot,
@@ -509,4 +517,23 @@ fn cli_offline_resume_is_blocked_by_a_concurrent_lock_holder() {
         "once the lock is released, offline resume must succeed: {}",
         String::from_utf8_lossy(&unblocked.stderr)
     );
+}
+
+#[test]
+fn scoped_sweep_leaves_other_agent_markers_stopped() {
+    let home = TempHome::new("scope");
+    let owned = OwnedSleep::spawn(&home.marker);
+    let other = OwnedSleep::spawn("CODEX_THREAD_ID");
+    owned.stop();
+    other.stop();
+
+    let daemon = DaemonGuard::start(&home.path);
+    wait_resumed(owned.pid());
+    assert!(is_stopped(other.pid()), "out-of-scope marker was resumed");
+    daemon.kill();
+
+    owned.stop();
+    assert!(run_cli(&home.path, &["resume", "--all"]).status.success());
+    wait_resumed(owned.pid());
+    assert!(is_stopped(other.pid()), "offline sweep ignored its scope");
 }
