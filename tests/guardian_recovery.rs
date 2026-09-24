@@ -452,6 +452,24 @@ fn cli_offline_resume_recovers_directly_when_no_daemon_is_reachable() {
         )],
     );
 
+    for args in [
+        &["--help"][..],
+        &["--version"],
+        &["status", "--json"],
+        &["ps", "--json"],
+        &["top"],
+    ] {
+        let output = run_cli(&home.path, args);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ballast resume --all"),
+            "{args:?}"
+        );
+        assert!(
+            is_stopped(owned.pid()),
+            "read-only commands must not signal the frozen child"
+        );
+    }
+
     let output = run_cli(&home.path, &["resume", "--all"]);
     assert!(
         output.status.success(),

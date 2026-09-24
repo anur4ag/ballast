@@ -117,6 +117,8 @@ fn snapshot_with(
         pressure,
         attribution: AttributionSnapshot::default(),
         frozen: Vec::new(),
+        held: Vec::new(),
+        guardian: None,
     }
 }
 
@@ -532,7 +534,7 @@ fn heavy_command_holds_at_elevated_pressure_with_a_batch_running() {
     let home = TestHome::new("hold");
     let mut log = home.log();
     let snap = known_snapshot(Level::Elevated, true, Mode::Enforce);
-    let (connection, receiver, _cancelled) = connection();
+    let (connection, receiver, cancelled) = connection();
 
     admission.handle(
         hook_request(
@@ -561,6 +563,14 @@ fn heavy_command_holds_at_elevated_pressure_with_a_batch_running() {
         "hold must be recorded in decisions.jsonl: {}",
         home.decisions()
     );
+    let held = admission.held();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].agent, "claude");
+    assert_eq!(held[0].session_id, "s1");
+    assert_eq!(held[0].label, "npm install");
+    assert!(held[0].since_ms > 0);
+    cancelled.store(true, Ordering::Relaxed);
+    assert!(admission.held().is_empty());
 }
 
 /// Regression for review finding 1: a decision record used to carry the whole

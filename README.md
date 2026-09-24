@@ -75,10 +75,11 @@ Journaled processes are recovered regardless of this setting.
 
 IPC uses newline-delimited JSON over `run/ballastd.sock` (protocol version 1).
 For example, `{"version":1,"method":"status"}` returns `{"version":1,"type":"status","status":{...}}`.
-`snapshot`, `ps`, and `top` return `type: "snapshot"` with a `snapshot` containing status, capabilities, boot identity, processes, process changes, and raw pressure inputs.
+`snapshot` and `ps` return `type: "snapshot"` with status, capabilities, boot identity, processes, process changes, attribution, frozen/held work, guardian explanations, and raw pressure inputs.
+`top` returns the same shape projected to attributed processes, without executable/argv data or process changes; machine-wide totals and pressure inputs remain intact.
 `resume` (optional `target`), `stop` (`target`), `gc`, and `hook` (`payload`) are routed to the tick loop.
 Cleanup requests return `type: "cleanup"` with a `report` containing `observe`, `scheduled` and `pending` target IDs, `services` (workload ID, PIDs, ports), and `orphans` (identity and executable basename).
-`ballast hook claude|codex` bridges agent hooks to the daemon and fails open when unavailable.
+`ballast hook claude|codex` bridges admission and lifecycle hooks to the daemon and fails open when unavailable.
 Errors use `{"version":1,"type":"error","message":"..."}`.
 A connection supports multiple requests; malformed JSON and unsupported versions return errors, while incomplete or oversized lines close the connection.
 Requests are capped at 64 KiB and the server admits up to 64 simultaneous clients.
@@ -87,3 +88,6 @@ The first sample and the first sample after a gap longer than five ticks are mar
 Consumers must reset rate baselines on this flag, including cumulative process CPU counters.
 Observation errors retain the previous process table, expose `last_error`, and invalidate the sample.
 The daemon writes rotated operational and decision logs under `log/`; later tickets provide attribution, pressure policy, and decisions.
+
+Run `ballast top` for the live fleet, or `ballast ps --json` for scriptable snapshots.
+See [CLI controls and JSON schema](docs/cli.md).

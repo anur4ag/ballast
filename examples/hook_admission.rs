@@ -42,6 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pressure: Some(platform.pressure()?),
         attribution: AttributionSnapshot::default(),
         frozen: Vec::new(),
+        held: Vec::new(),
+        guardian: None,
     };
     let published = Arc::new(RwLock::new(Arc::new(serde_json::from_value::<Snapshot>(
         serde_json::to_value(&snapshot)?,

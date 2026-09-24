@@ -4,7 +4,7 @@ mod protection;
 mod state;
 #[cfg(test)]
 mod tests;
-pub use admission::Admission;
+pub use admission::{Admission, HeldCommand};
 pub use classify::Classifier;
 pub use protection::{HookEvidence, PortOwners, lookup};
 pub use state::HookState;

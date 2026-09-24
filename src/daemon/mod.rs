@@ -51,6 +51,10 @@ pub struct Snapshot {
     pub attribution: AttributionSnapshot,
     #[serde(default)]
     pub frozen: Vec<FrozenWorkload>,
+    #[serde(default)]
+    pub held: Vec<crate::hooks::HeldCommand>,
+    #[serde(default)]
+    pub guardian: Option<crate::guardian::GuardianNote>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ProcessChanges {
@@ -204,6 +208,8 @@ fn run_with_targets(
         pressure: None,
         attribution: AttributionSnapshot::default(),
         frozen: Vec::new(),
+        held: Vec::new(),
+        guardian: None,
     })));
     let (send, requests) = mpsc::sync_channel(128);
     let mut socket_server = Some((server, send));
@@ -279,6 +285,8 @@ fn run_with_targets(
                     pressure,
                     attribution,
                     frozen: Vec::new(),
+                    held: Vec::new(),
+                    guardian: None,
                 }
             } else {
                 attributor.reset_growth();
@@ -293,6 +301,8 @@ fn run_with_targets(
                     changes: ProcessChanges::default(),
                     pressure: None,
                     frozen: Vec::new(),
+                    held: Vec::new(),
+                    guardian: None,
                 }
             };
             hook_state.apply(&mut next.attribution, started);
@@ -328,6 +338,8 @@ fn run_with_targets(
             next.status.cleanup_pending = cleanup.pending_targets();
             next.frozen = guardian.frozen.clone();
             admission.tick(&next, &mut hook_state, &mut decisions, started);
+            next.held = admission.held();
+            next.guardian = Some(guardian.note.clone());
             {
                 let mut view = published.write().unwrap();
                 *view = Arc::new(next);

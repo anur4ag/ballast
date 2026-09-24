@@ -1,5 +1,6 @@
 pub mod attribution;
 pub mod cleanup;
+pub mod cli;
 pub mod daemon;
 pub mod guardian;
 pub mod hooks;

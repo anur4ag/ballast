@@ -19,7 +19,10 @@ enum Command {
         timeout_seconds: u64,
     },
     Top,
-    Ps,
+    Ps {
+        #[arg(long)]
+        json: bool,
+    },
     Status {
         #[arg(long)]
         json: bool,
@@ -62,10 +65,10 @@ enum DebugCommand {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let command = Cli::parse().command;
-    if !matches!(command, Command::Hook { .. }) {
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("hook")) {
         ballast::daemon::warn_if_stranded();
     }
+    let command = Cli::parse().command;
     match command {
         Command::Install => ballast::install::Installation::from_env()?.install()?,
         Command::Uninstall { purge } => {
@@ -86,55 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Gc => ballast::cleanup::command(None)?,
         Command::Stop { target } => ballast::cleanup::command(Some(target))?,
-        Command::Ps => {
-            use ballast::daemon::{
-                files::Paths,
-                ipc::{Client, Method, Reply},
-            };
-            let response = Client::connect(&Paths::from_env()?, std::time::Duration::from_secs(1))
-                .and_then(|mut client| client.request(Method::Ps))
-                .map_err(|error| format!("daemon unreachable: {error}"))?;
-            let Reply::Snapshot { snapshot } = response.reply else {
-                return Err("unexpected daemon snapshot response".into());
-            };
-            print!("{}", ballast::attribution::format_ps(&snapshot));
-        }
-        Command::Status { json } => {
-            use ballast::daemon::{
-                files::Paths,
-                ipc::{Client, Method, Reply},
-            };
-            let response = Client::connect(&Paths::from_env()?, std::time::Duration::from_secs(1))
-                .and_then(|mut client| client.request(Method::Status))
-                .map_err(|error| format!("daemon unreachable: {error}"))?;
-            let Reply::Status { status } = &response.reply else {
-                return Err("unexpected daemon status response".into());
-            };
-            if json {
-                println!("{}", serde_json::to_string(&response)?);
-            } else {
-                println!(
-                    "Ballast {} running (pid {})\ntick {}: {:.3} ms CPU, {:.3} ms wall, {} ms interval; {} processes",
-                    status.daemon_version,
-                    status.pid,
-                    status.tick,
-                    status.tick_cpu_ns as f64 / 1_000_000.0,
-                    status.tick_wall_ns as f64 / 1_000_000.0,
-                    status.tick_interval_ms,
-                    status.process_count
-                );
-                println!(
-                    "Pressure: {:?}; agent batch running: {}",
-                    status.pressure_level, status.batch_running
-                );
-                if !status.cleanup_pending.is_empty() {
-                    println!("Cleanup pending: {}", status.cleanup_pending.join(", "));
-                }
-                if let Some(error) = &status.last_error {
-                    println!("Last observation failed: {error}");
-                }
-            }
-        }
+        Command::Top => ballast::cli::run()?,
+        Command::Ps { json } => ballast::cli::ps(json)?,
+        Command::Status { json } => ballast::cli::status(json)?,
         Command::Debug {
             command: DebugCommand::Platform,
         } => {
@@ -164,7 +121,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             timeout_seconds,
         ),
-        _ => return Err("this subcommand is not implemented yet".into()),
     }
     Ok(())
 }

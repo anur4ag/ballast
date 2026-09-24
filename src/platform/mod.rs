@@ -69,6 +69,8 @@ pub struct PressureInputs {
     pub total_memory_bytes: Option<u64>,
     pub used_memory_bytes: Option<u64>,
     pub swap_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub swap_total_bytes: Option<u64>,
     pub kernel_pressure_level: Option<u32>,
     pub pageouts: Option<u64>,
     pub swapins: Option<u64>,

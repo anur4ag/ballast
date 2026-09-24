@@ -186,6 +186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pressure,
                 attribution,
                 frozen: Vec::new(),
+                held: Vec::new(),
+                guardian: None,
             };
             guardian.tick(now, &snapshot, &mut platform, &mut attributor, &mut log)?;
             max_level = max_level.max(guardian.level);
