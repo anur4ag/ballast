@@ -71,5 +71,5 @@ Description: Keep your machine responsive while coding agents work
  Before removing the package, run ballast uninstall as that user.
 """)
     subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(root),
-                    str(dist / f"ballast_{deb_version}_{arch}.deb")], check=True,
+                    str(dist / f"ballast_{version}_{arch}.deb")], check=True,
                    env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)})
