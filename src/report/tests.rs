@@ -103,7 +103,7 @@ fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
     );
     assert_eq!(
         (t.holds, t.median_wait(), t.timed_out_holds),
-        (2, Some(40), 1)
+        (2, Some(170), 1)
     );
     assert_eq!(
         (
@@ -296,4 +296,29 @@ fn a_missing_frozen_workload_is_an_unknown_memory_sample() {
         panic!("expected sample");
     };
     assert_eq!(frozen, [("missing".into(), 0, false)]);
+}
+
+#[test]
+fn a_late_confirmed_exit_keeps_its_last_observed_memory() {
+    let at = crate::daemon::unix_ms();
+    let mut e = Engine::new(Store::default());
+    let process = json!({"pid":101,"start_time":1});
+    event(
+        &mut e,
+        at,
+        "clean",
+        json!({"mode":"enforce","decision":{"process":process,"signal":"Kill","error":null,"memory_bytes":512,"agent":{"state":"ended"}}}),
+    );
+    sample(&mut e, at + 700_000, Some("normal"));
+    event(
+        &mut e,
+        at + 700_000,
+        "clean_reclaimed",
+        json!({"mode":"enforce","decision":{"processes":[process]}}),
+    );
+    let totals = e.store.report(1, at + 700_000).unwrap().totals.enforce;
+    assert_eq!(
+        (totals.reclaimed_processes, totals.reclaimed_memory_bytes),
+        (1, 512)
+    );
 }

@@ -167,7 +167,7 @@ Daily and combined totals each have `enforce` and `observe` objects with these f
 | `kills_blocked` | Cross-agent kill denials, or observe proposals |
 | `forced_resumes` | Resumes at the ten-minute freeze cap, including simulated observe resumes |
 
-The lower median bucket is used for an even number of waits; the worst wait is the largest occupied bucket.
+For an even number of waits, the two middle buckets are averaged and rounded down to whole seconds; the worst wait is the largest occupied bucket.
 A hold is counted on admission to the queue, while its wait is counted on completion, possibly on another local day.
 Pending waits lost on daemon restart have no invented completion or wait measurement.
 Reclaimed memory is the sum of per-process measurements, not a claim about memory returned to the OS; shared pages may overlap.

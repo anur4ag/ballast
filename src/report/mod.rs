@@ -107,9 +107,14 @@ impl Totals {
             return None;
         }
         let mut seen = 0;
+        let mut lower = None;
         self.hold_wait_seconds.iter().find_map(|(&seconds, &n)| {
             seen += n;
-            (seen > (count - 1) / 2).then_some(seconds)
+            if seen > (count - 1) / 2 && lower.is_none() {
+                lower = Some(seconds);
+            }
+            (seen > count / 2)
+                .then(|| ((u32::from(lower.unwrap()) + u32::from(seconds)) / 2) as u16)
         })
     }
     fn add(&mut self, other: &Self) {
@@ -403,7 +408,7 @@ struct Engine {
     previous: Option<(u64, bool, Option<String>)>,
     frozen: HashMap<String, Frozen>,
     comparisons: Vec<Comparison>,
-    reclaim: HashMap<ProcessIdentity, (u64, Option<u64>)>,
+    reclaim: HashMap<ProcessIdentity, Option<u64>>,
 }
 impl Engine {
     fn new(store: Store) -> Self {
@@ -443,9 +448,6 @@ impl Engine {
                         }
                     }
                 }
-                // Unconfirmed cleanup attempts expire; no process identity is persisted.
-                self.reclaim
-                    .retain(|_, (seen, _)| at.saturating_sub(*seen) <= 600_000);
                 self.previous = Some((at, observe, level.clone()));
                 self.advance_frozen(at);
                 let mut memories: HashMap<(bool, String), (u64, bool)> = HashMap::new();
@@ -593,19 +595,18 @@ impl Engine {
                     self.reclaim
                         .entry(id)
                         .and_modify(|last| {
-                            last.0 = at;
                             if memory.is_some() {
-                                last.1 = memory;
+                                *last = memory;
                             }
                         })
-                        .or_insert((at, memory));
+                        .or_insert(memory);
                 }
             }
             "clean_reclaimed" if !observe => {
                 if let Some(processes) = d["processes"].as_array() {
                     for process in processes {
                         if let Ok(id) = serde_json::from_value(process.clone()) {
-                            if let Some((_, memory)) = self.reclaim.remove(&id) {
+                            if let Some(memory) = self.reclaim.remove(&id) {
                                 let t = self.store.totals(at, false);
                                 t.reclaimed_processes += 1;
                                 t.reclaimed_memory_bytes += memory.unwrap_or(0);
