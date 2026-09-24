@@ -132,8 +132,24 @@ fn fake_daemon(
 ) -> thread::JoinHandle<Value> {
     std::fs::create_dir_all(home.socket_path().parent().unwrap()).expect("create run dir");
     let listener = UnixListener::bind(home.socket_path()).expect("bind fake daemon socket");
+    listener.set_nonblocking(true).unwrap();
     thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept hook connection");
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("hook did not connect within {CONNECT_TIMEOUT:?}: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(CLI_TIMEOUT)).unwrap();
+        stream.set_write_timeout(Some(CLI_TIMEOUT)).unwrap();
         let mut writer = stream.try_clone().expect("clone fake daemon stream");
         let mut reader = BufReader::new(stream);
         let mut line = String::new();

@@ -113,7 +113,7 @@ python3 spikes/verify_top.py
 ```
 
 This uses tmux, a temporary Ballast home, production IPC/admission/guardian code, synthetic pressure, and three test-owned sleep processes.
-It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/t09` directory, then verifies admission and resume after pressure returns to Normal.
+It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/` directory, then verifies admission and resume after pressure returns to Normal.
 The fixture accepts `exit` in its pressure file, thaws on normal exit, and also exits after 150 seconds.
 
 ## Effectiveness report
