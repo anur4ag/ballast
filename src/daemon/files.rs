@@ -71,6 +71,7 @@ pub enum Mode {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mode: Mode,
+    pub cleanup_grace_seconds: u64,
     pub pressure: crate::guardian::Thresholds,
     pub markers: Vec<crate::attribution::Marker>,
     pub shells: Vec<String>,
@@ -81,6 +82,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Enforce,
+            cleanup_grace_seconds: 30,
             pressure: crate::guardian::Thresholds::default(),
             markers: Vec::new(),
             shells: Vec::new(),

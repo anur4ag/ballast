@@ -39,12 +39,20 @@ Run `cargo run -- daemon` in the foreground as your normal user, then `cargo run
 A second daemon using the same directory refuses to start.
 The daemon holds a lifetime flock on `BALLAST_HOME` itself, so replacing `run/` cannot split ownership; socket repair checks its bound socket inode.
 Deleting and recreating the whole base directory while a daemon runs is unsupported.
-Other CLI commands remain placeholders.
+`ballast gc` immediately cleans ended agents and lists their surviving services and unattributed dev-tool orphans.
+`ballast stop <agent-id>|<workload-id>` stops the selected workloads, including services, without stopping the agent or its internal processes.
+Find IDs with `ballast ps`.
+Accepted stops remain pending through uncertain membership; `ballast gc` and `ballast status` list the pending workload IDs.
+Initial TERM waits for positive workload membership; explicit-stop escalation follows the exact identities that received TERM, with agent roots protected.
+Both cleanup commands return after scheduling termination; the daemon resumes frozen work, sends SIGTERM, and sends SIGKILL to survivors after five seconds.
+Automatic cleanup waits 30 seconds after confirmed agent exit, reclaims batch and agent-internal leftovers, and reports services without terminating them.
+Observe mode records these decisions without signalling processes.
 
 The optional `config.toml` currently accepts these defaults:
 
 ```toml
-mode = "enforce" # or "observe"; process actions arrive with the guardian
+mode = "enforce" # or "observe"
+cleanup_grace_seconds = 30
 log_max_bytes = 5242880
 log_rotations = 3 # 1 through 10 archived files per log
 ```
@@ -52,7 +60,9 @@ log_rotations = 3 # 1 through 10 archived files per log
 IPC uses newline-delimited JSON over `run/ballastd.sock` (protocol version 1).
 For example, `{"version":1,"method":"status"}` returns `{"version":1,"type":"status","status":{...}}`.
 `snapshot`, `ps`, and `top` return `type: "snapshot"` with a `snapshot` containing status, capabilities, boot identity, processes, process changes, and raw pressure inputs.
-`resume` (optional `target`), `stop` (`target`), `gc`, and `hook` (`payload`) are routed to the tick loop and currently return an unimplemented error.
+`resume` (optional `target`), `stop` (`target`), `gc`, and `hook` (`payload`) are routed to the tick loop.
+Cleanup requests return `type: "cleanup"` with a `report` containing `observe`, `scheduled` and `pending` target IDs, `services` (workload ID, PIDs, ports), and `orphans` (identity and executable basename).
+The hook bridge is a placeholder.
 Errors use `{"version":1,"type":"error","message":"..."}`.
 A connection supports multiple requests; malformed JSON and unsupported versions return errors, while incomplete or oversized lines close the connection.
 Requests are capped at 64 KiB and the server admits up to 64 simultaneous clients.

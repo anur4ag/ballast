@@ -50,6 +50,7 @@ pub struct Response {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
+    Cleanup { report: crate::cleanup::Report },
     Resumed { count: usize },
     Status { status: Status },
     Snapshot { snapshot: Arc<Snapshot> },

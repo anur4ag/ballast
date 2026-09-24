@@ -36,6 +36,8 @@ pub struct Status {
     pub pressure_level: Level,
     #[serde(default)]
     pub batch_running: bool,
+    #[serde(default)]
+    pub cleanup_pending: Vec<String>,
     pub last_error: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +161,10 @@ fn run_with_targets(
         config.mode,
         config.pressure.clone(),
     );
+    let mut cleanup = crate::cleanup::Cleanup::new(
+        config.mode,
+        Duration::from_secs(config.cleanup_grace_seconds),
+    );
     let capabilities = platform.capabilities();
     let mut status = Status {
         daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -173,6 +179,7 @@ fn run_with_targets(
         process_count: 0,
         pressure_level: Level::Normal,
         batch_running: false,
+        cleanup_pending: Vec::new(),
         last_error: None,
     };
     let published = Arc::new(RwLock::new(Arc::new(Snapshot {
@@ -193,6 +200,7 @@ fn run_with_targets(
     let mut observer = Observer::default();
     let mut attributor = Attributor::new(config.markers.clone(), config.shells.clone());
     let mut next_tick = Instant::now();
+    let mut observation_valid = false;
     loop {
         if Instant::now() >= next_tick {
             let started = Instant::now();
@@ -205,6 +213,7 @@ fn run_with_targets(
             status.last_error = None;
             let mut frozen_watched = guardian.watched();
             frozen_watched.extend(&extra_watched);
+            frozen_watched.extend(cleanup.watched());
             let watched = attributor.watched(&frozen_watched);
             let mut metric_targets = attributor.metric_targets();
             metric_targets.extend(&extra_metrics);
@@ -237,6 +246,7 @@ fn run_with_targets(
                     eprintln!("daemon log failed: {write_error}");
                 }
             }
+            observation_valid = snapshot.is_some();
             let mut next = if let Some((mut processes, changes, pressure)) = snapshot {
                 let attribution = attributor.update(
                     &platform,
@@ -270,6 +280,9 @@ fn run_with_targets(
                     frozen: Vec::new(),
                 }
             };
+            if observation_valid {
+                cleanup.tick(started, &next, &mut guardian, &platform, &mut decisions);
+            }
             let result = guardian.tick(
                 started,
                 &next,
@@ -277,24 +290,26 @@ fn run_with_targets(
                 &mut attributor,
                 &mut decisions,
             );
-            let mut errors = guardian.take_errors();
+            let mut errors: Vec<_> = guardian
+                .take_errors()
+                .into_iter()
+                .map(|e| format!("guardian: {e}"))
+                .collect();
+            errors.extend(cleanup.take_errors());
             if let Err(error) = result {
-                errors.push(error.to_string());
+                errors.push(format!("guardian: {error}"));
             }
             for error in errors {
-                next.status
-                    .last_error
-                    .get_or_insert_with(|| format!("guardian: {error}"));
-                if let Err(write_error) =
-                    log.write_line(&format!("{} guardian: {error}", unix_ms()))
-                {
-                    eprintln!("guardian: {error}; daemon log failed: {write_error}");
+                next.status.last_error.get_or_insert_with(|| error.clone());
+                if let Err(write_error) = log.write_line(&format!("{} {error}", unix_ms())) {
+                    eprintln!("{error}; daemon log failed: {write_error}");
                 }
             }
             observer.set_fast_polling(guardian.level != Level::Normal);
             next.status.tick_interval_ms = observer.interval().as_millis() as u64;
             next.status.pressure_level = guardian.level;
             next.status.batch_running = guardian.batch_running(&next.attribution, &next.processes);
+            next.status.cleanup_pending = cleanup.pending_targets();
             next.frozen = guardian.frozen.clone();
             {
                 let mut view = published.write().unwrap();
@@ -332,6 +347,31 @@ fn run_with_targets(
                             }
                             Err(e) => ipc::Response::error(e.to_string()),
                         },
+                        ipc::Method::Gc | ipc::Method::Stop { .. } if !observation_valid => {
+                            ipc::Response::error(
+                                "process observation unavailable; retry after a successful scan",
+                            )
+                        }
+                        method @ (ipc::Method::Gc | ipc::Method::Stop { .. }) => {
+                            let view = published.read().unwrap().clone();
+                            let target = match &method {
+                                ipc::Method::Stop { target } => Some(target.as_str()),
+                                _ => None,
+                            };
+                            match cleanup.request(
+                                target,
+                                &view,
+                                &mut guardian,
+                                &platform,
+                                &mut decisions,
+                            ) {
+                                Ok(report) => {
+                                    next_tick = Instant::now();
+                                    ipc::Response::new(ipc::Reply::Cleanup { report })
+                                }
+                                Err(e) => ipc::Response::error(e.to_string()),
+                            }
+                        }
                         _ => ipc::Response::error("request is not implemented yet"),
                     };
                     let _ = request.reply.send(response);

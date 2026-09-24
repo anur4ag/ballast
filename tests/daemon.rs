@@ -66,6 +66,7 @@ struct DaemonGuard {
 impl DaemonGuard {
     fn spawn(tag: &str) -> Self {
         let home = TempHome::new(tag);
+        std::fs::write(home.path.join("config.toml"), "mode = \"observe\"\n").unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_ballast"))
             .arg("daemon")
             .env("BALLAST_HOME", &home.path)
@@ -307,19 +308,35 @@ fn unknown_method_is_rejected_as_error_without_killing_the_daemon() {
 }
 
 #[test]
-fn a_queued_mutation_returns_a_versioned_unimplemented_error() {
-    let daemon = DaemonGuard::start("queuedmutation");
+fn gc_returns_a_report_and_cleanup_cli_uses_the_daemon() {
+    let daemon = DaemonGuard::start("cleanup");
     let mut stream = daemon.connect();
-
     let response = send_request(&mut stream, &json!({"version": 1, "method": "gc"}));
     assert_eq!(response["version"], 1);
-    assert_eq!(response["type"], "error");
+    assert_eq!(response["type"], "cleanup");
+    assert_eq!(response["report"]["observe"], true);
+    assert!(response["report"]["services"].is_array());
+    assert!(response["report"]["orphans"].is_array());
+    assert!(response["report"]["pending"].is_array());
+    assert!(daemon.status_request()["status"]["cleanup_pending"].is_array());
+    let gc = Command::new(env!("CARGO_BIN_EXE_ballast"))
+        .arg("gc")
+        .env("BALLAST_HOME", &daemon.home.path)
+        .output()
+        .unwrap();
     assert!(
-        response["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("not implemented")),
-        "queued mutation should report as not yet implemented: {response}"
+        gc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gc.stderr)
     );
+    assert!(String::from_utf8_lossy(&gc.stdout).contains("Would stop"));
+    let stop = Command::new(env!("CARGO_BIN_EXE_ballast"))
+        .args(["stop", "missing-test-workload"])
+        .env("BALLAST_HOME", &daemon.home.path)
+        .output()
+        .unwrap();
+    assert!(!stop.status.success());
+    assert!(String::from_utf8_lossy(&stop.stderr).contains("not found"));
 }
 
 #[test]

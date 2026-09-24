@@ -61,6 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("Resumed {count} frozen entries.");
         }
+        Command::Gc => ballast::cleanup::command(None)?,
+        Command::Stop { target } => ballast::cleanup::command(Some(target))?,
         Command::Ps => {
             use ballast::daemon::{
                 files::Paths,
@@ -102,6 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Pressure: {:?}; agent batch running: {}",
                     status.pressure_level, status.batch_running
                 );
+                if !status.cleanup_pending.is_empty() {
+                    println!("Cleanup pending: {}", status.cleanup_pending.join(", "));
+                }
                 if let Some(error) = &status.last_error {
                     println!("Last observation failed: {error}");
                 }

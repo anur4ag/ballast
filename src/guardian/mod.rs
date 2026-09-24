@@ -541,6 +541,17 @@ impl Guardian {
         Ok(workload)
     }
 
+    pub fn resume_for_cleanup(
+        &mut self,
+        id: &str,
+        now: Instant,
+        platform: &impl Platform,
+        log: &mut RotatingLog,
+    ) -> io::Result<()> {
+        self.ineligible.insert(id.to_owned(), now + INELIGIBLE);
+        self.resume_one(id, false, "cleanup", now, platform, log)
+    }
+
     pub fn resume(
         &mut self,
         target: Option<&str>,

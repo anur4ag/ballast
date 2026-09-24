@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     process_count: processes.len(),
                     pressure_level: guardian.level,
                     batch_running: false,
+                    cleanup_pending: Vec::new(),
                     last_error: None,
                 },
                 boot_id: boot_id.clone(),

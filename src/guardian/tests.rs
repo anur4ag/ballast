@@ -296,6 +296,7 @@ fn snapshot(
             process_count: processes.len(),
             pressure_level: Level::Normal,
             batch_running: false,
+            cleanup_pending: Vec::new(),
             last_error: None,
         },
         boot_id: "fake-boot".into(),

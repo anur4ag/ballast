@@ -49,26 +49,36 @@ impl Drop for ChildGuard {
 fn read_ready_line(stdout: ChildStdout) -> String {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => return,
-                Ok(_) => {
-                    let trimmed = line.trim_end().to_string();
-                    if trimmed.starts_with("READY") {
-                        let _ = tx.send(trimmed);
-                        return;
-                    }
-                }
-                Err(_) => return,
+        for line in BufReader::new(stdout).lines() {
+            let line = line.expect("read fixture readiness");
+            let ready = line.starts_with("READY");
+            if (ready || line.starts_with("PROGRESS:")) && tx.send(line).is_err() {
+                return;
+            }
+            if ready {
+                return;
             }
         }
     });
-    rx.recv_timeout(READY_TIMEOUT)
-        .unwrap_or_else(|e| panic!("fleet fixture did not report ready in time: {e}"))
+    let mut progress = String::from("waiting for first startup event");
+    loop {
+        // Bound a stalled startup stage, not the total time to launch an entire fleet.
+        let line = rx
+            .recv_timeout(READY_TIMEOUT)
+            .unwrap_or_else(|e| panic!("fleet fixture startup stalled after {progress}: {e}"));
+        if line.starts_with("READY") {
+            return line;
+        }
+        progress = line;
+    }
 }
+
+fn startup_event(event: &str) {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{event}").unwrap();
+    stdout.flush().unwrap();
+}
+
 fn wait_until(what: &str, deadline: Duration, mut f: impl FnMut() -> bool) {
     let until = Instant::now() + deadline;
     loop {
@@ -276,6 +286,55 @@ const NOISE_COUNT_ENV: &str = "BALLAST_FLEET_NOISE_COUNT";
 const RELAY_TAG_ENV: &str = "BALLAST_FLEET_RELAY_TAG";
 const TARGET_TOTAL_PROCESSES: usize = 1000;
 
+fn start_fleet(
+    worker_bin: &std::path::Path,
+    root_count: usize,
+    noise_count: usize,
+    tag: &str,
+) -> (PgidGuard, Vec<i32>) {
+    let mut relay = ChildGuard(
+        Command::new(worker_bin)
+            .args(["relay_fixture", "--exact", "--ignored", "--nocapture"])
+            .env_clear()
+            .env(MODE_ENV, "relay")
+            .env(ROOT_COUNT_ENV, root_count.to_string())
+            .env(NOISE_COUNT_ENV, noise_count.to_string())
+            .env(RELAY_TAG_ENV, tag)
+            .env(HELPER_EXE_ENV, worker_bin)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn fleet relay"),
+    );
+    let relay_pid = relay.0.id() as i32;
+    // Everything the relay spawns (roots, their shells/workers/internals, and noise) stays in
+    // this one process group even after being reparented to pid 1, so one killpg reclaims the
+    // whole fleet regardless of what the rest of this test does or panics on.
+    let group_guard = PgidGuard(relay_pid);
+    let relay_stdout = relay.0.stdout.take().expect("piped stdout");
+    let ready = read_ready_line(relay_stdout);
+    let root_pids: Vec<i32> = ready
+        .strip_prefix("READY:")
+        .expect("relay must report root pids")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().expect("root pid must be numeric"))
+        .collect();
+    assert_eq!(
+        root_pids.len(),
+        root_count,
+        "relay must have spawned every requested root"
+    );
+    let status = relay.0.wait().expect("wait on relay");
+    assert!(
+        status.success(),
+        "relay must exit cleanly after spawning its fleet"
+    );
+    (group_guard, root_pids)
+}
+
 #[test]
 #[ignore]
 fn attributed_fleet_benchmark_at_scale() {
@@ -297,44 +356,8 @@ fn attributed_fleet_benchmark_at_scale() {
         .saturating_sub(root_count * 11)
         .min(900);
 
-    let mut relay = Command::new(&worker_bin)
-        .args(["relay_fixture", "--exact", "--ignored", "--nocapture"])
-        .env_clear()
-        .env(MODE_ENV, "relay")
-        .env(ROOT_COUNT_ENV, root_count.to_string())
-        .env(NOISE_COUNT_ENV, noise_count.to_string())
-        .env(RELAY_TAG_ENV, &tag)
-        .env(HELPER_EXE_ENV, &worker_bin)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn fleet relay");
-    let relay_pid = relay.id() as i32;
-    // Everything the relay spawns (roots, their shells/workers/internals, and noise) stays in
-    // this one process group even after being reparented to pid 1, so one killpg reclaims the
-    // whole fleet regardless of what the rest of this test does or panics on.
-    let _group_guard = PgidGuard(relay_pid);
-    let relay_stdout = relay.stdout.take().expect("piped stdout");
-    let ready = read_ready_line(relay_stdout);
-    let root_pids: Vec<i32> = ready
-        .strip_prefix("READY:")
-        .expect("relay must report root pids")
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse().expect("root pid must be numeric"))
-        .collect();
-    assert_eq!(
-        root_pids.len(),
-        root_count,
-        "relay must have spawned every requested root"
-    );
-    let status = relay.wait().expect("wait on relay");
-    assert!(
-        status.success(),
-        "relay must exit cleanly after spawning its fleet"
-    );
+    let (group_guard, _) = start_fleet(&worker_bin, root_count, noise_count, &tag);
+    let relay_pid = group_guard.0;
     println!(
         "spawned {root_count} owner-marked root trees and {noise_count} unattributed noise fillers (baseline {baseline})"
     );
@@ -508,21 +531,23 @@ fn relay_fixture() {
 
     let mut root_pids = Vec::with_capacity(root_count);
     for i in 0..root_count {
-        let child = Command::new(&exe)
+        let mut child = Command::new(&exe)
             .args(["root_fixture", "--exact", "--ignored", "--nocapture"])
             .env_clear()
             .env(MODE_ENV, "root")
             .env(HELPER_EXE_ENV, &exe)
             .env("BALLAST_OWNER", format!("{tag}-{i}"))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap_or_else(|e| panic!("spawn root {i}: {e}"));
+        read_ready_line(child.stdout.take().unwrap());
+        startup_event(&format!("PROGRESS:root {} ready", i + 1));
         root_pids.push(child.id());
         std::mem::forget(child);
     }
-    for _ in 0..noise_count {
+    for i in 0..noise_count {
         match Command::new("sleep")
             .arg("3600")
             .env_clear()
@@ -531,18 +556,21 @@ fn relay_fixture() {
             .stderr(Stdio::null())
             .spawn()
         {
-            Ok(child) => std::mem::forget(child),
+            Ok(child) => {
+                std::mem::forget(child);
+                startup_event(&format!("PROGRESS:filler {} spawned", i + 1));
+            }
             Err(_) => break,
         }
     }
-    println!(
+    startup_event(&format!(
         "READY:{}",
         root_pids
             .iter()
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",")
-    );
+    ));
     std::process::exit(0);
 }
 
@@ -551,29 +579,32 @@ fn relay_fixture() {
 #[test]
 #[ignore]
 fn root_fixture() {
-    Command::new("/bin/sh")
+    let mut shell = Command::new("/bin/sh")
         .args([
             "-c",
-            "sleep 60 & sleep 60 & sleep 60 & sleep 60 & sleep 60 & sleep 60 & wait",
+            "sleep 60 & sleep 60 & sleep 60 & sleep 60 & sleep 60 & sleep 60 & printf 'READY\\n'; wait",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
-        .map(std::mem::forget)
         .expect("spawn root's workload shell");
+    read_ready_line(shell.stdout.take().unwrap());
+    std::mem::forget(shell);
     let exe = std::env::var(HELPER_EXE_ENV).expect("helper exe path");
     for _ in 0..3 {
-        Command::new(&exe)
+        let mut child = Command::new(&exe)
             .args(["idle_fixture", "--exact", "--ignored", "--nocapture"])
             .env(MODE_ENV, "idle")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()
-            .map(std::mem::forget)
             .expect("spawn root's internal child");
+        read_ready_line(child.stdout.take().unwrap());
+        std::mem::forget(child);
     }
+    startup_event("READY");
     sleep(CHILD_LIFETIME_CAP);
 }
 
@@ -585,4 +616,58 @@ fn daemon_fixture() {
     std::fs::write(paths.base.join("config.toml"), "mode = \"observe\"\n")
         .expect("observe benchmark");
     ballast::daemon::run(paths).expect("daemon run");
+}
+
+/// Exercises the benchmark's actual startup path without 50 unrelated 20-tick samples.
+#[test]
+#[ignore]
+fn fleet_startup_is_stable_under_parallel_load() {
+    for loaded in [false, true] {
+        let load: Vec<_> = (0..if loaded { 4 } else { 0 })
+            .map(|_| {
+                ChildGuard(
+                    Command::new("/usr/bin/yes")
+                        .env_clear()
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        for iteration in 0..25 {
+            let scratch = ScratchDir::new("startup-stress");
+            let worker = copy_self_as(&scratch.0, "blt-fleet-worker");
+            let baseline = NativePlatform::new()
+                .unwrap()
+                .list_processes(&Default::default(), &Default::default())
+                .unwrap()
+                .len();
+            let noise = TARGET_TOTAL_PROCESSES
+                .saturating_sub(baseline)
+                .saturating_sub(110)
+                .min(900);
+            let started = Instant::now();
+            let (group, roots) = start_fleet(&worker, 10, noise, "startup-stress");
+            assert_eq!(roots.len(), 10);
+            let count = NativePlatform::new()
+                .unwrap()
+                .list_processes(&Default::default(), &Default::default())
+                .unwrap()
+                .iter()
+                .filter(|p| p.pgid == group.0)
+                .count();
+            assert!(
+                count >= 110,
+                "all acknowledged root trees must be live: {count}"
+            );
+            println!(
+                "startup iteration {} loaded={loaded}: {:?}, {count} fixture processes",
+                iteration + 1,
+                started.elapsed()
+            );
+        }
+        drop(load);
+    }
 }
