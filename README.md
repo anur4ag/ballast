@@ -40,9 +40,9 @@ ballast install
 Choose components with `c`, inspect the full diff with `d`, or press Enter to apply and run the health checks.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/install-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/install-light.svg">
-  <img alt="Ballast installer showing the service, Claude Code and Codex hook plan before asking for approval" src="docs/assets/install-light.svg" width="900">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/install-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/install-light.svg">
+  <img alt="Ballast installer showing the service, Claude Code and Codex hook plan before asking for approval" src="docs/images/install-light.svg" width="900">
 </picture>
 
 *A real installation plan captured in an isolated home.*
