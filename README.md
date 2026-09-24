@@ -36,10 +36,21 @@ sudo apt update && sudo apt install ballast
 ballast install
 ```
 
-`ballast install` starts a per-user service and adds agent hooks.
+`ballast install` shows the detected agents, exact files, hooks and backups before asking for approval.
+Choose components with `c`, inspect the full diff with `d`, or press Enter to apply and run the health checks.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/install-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/install-light.svg">
+  <img alt="Ballast installer showing the service, Claude Code and Codex hook plan before asking for approval" src="docs/assets/install-light.svg" width="900">
+</picture>
+
+*A real installation plan captured in an isolated home.*
+
 Open Codex, run `/hooks`, and approve the Ballast hooks when prompted.
 Start a new agent session after installation.
 Use `ballast doctor` to check the service, hooks, trust and platform access.
+For scripts, preview with `ballast install --dry-run --json`, then apply an approved plan with `ballast install --yes --json`.
 Homebrew and APT upgrades restart the daemon automatically; no second install command is needed.
 
 Prefer asking your coding agent?

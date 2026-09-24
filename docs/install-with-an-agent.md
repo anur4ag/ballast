@@ -32,6 +32,7 @@ On Debian or Ubuntu, show these privileged steps to the user and wait for their 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://anur4ag.github.io/ballast/key.gpg | sudo tee /etc/apt/keyrings/ballast.asc >/dev/null
+sudo chmod 644 /etc/apt/keyrings/ballast.asc
 echo 'deb [signed-by=/etc/apt/keyrings/ballast.asc] https://anur4ag.github.io/ballast/apt stable main' | sudo tee /etc/apt/sources.list.d/ballast.list
 sudo apt update
 sudo apt install ballast
