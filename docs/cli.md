@@ -239,7 +239,9 @@ Each item has string `id`, `purpose` and `detail`, booleans `selected` and `chan
 Each file has `path`, nullable `before` and `after` strings, a full-file unified `diff`, and nullable absolute `backup` path.
 Null `before` creates a file and null `after` removes one.
 Equal `before` and `after` means no write or backup.
-The backup name is chosen during planning and is the name used during application of that plan.
+The backup name uses local time, for example `settings.json.ballast-2026-09-25T10-02-41.bak`, with a numeric suffix only when that name already exists.
+It is chosen during planning and is the name used during application of that plan.
+Uninstall preserves backups from both this naming scheme and older versions.
 A later command computes a fresh plan and fresh backup names from current files.
 Service items also describe private runtime, state and log directories; purge items identify the entire Ballast data directory to remove.
 Runtime files created by the daemon are not agent configuration diffs.

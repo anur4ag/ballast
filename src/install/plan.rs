@@ -125,14 +125,40 @@ impl FileChange {
                 }
             }
             if backup && result.before.is_some() {
-                let stamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos();
-                result.backup = Some(result.path.with_file_name(format!(
-                    "{}.ballast-{stamp}.bak",
-                    result.path.file_name().unwrap().to_string_lossy()
-                )));
+                let seconds = unsafe { libc::time(std::ptr::null_mut()) };
+                let mut local: libc::tm = unsafe { std::mem::zeroed() };
+                if unsafe { libc::localtime_r(&seconds, &mut local) }.is_null() {
+                    return Err(io::Error::other("cannot determine local backup time"));
+                }
+                let stamp = format!(
+                    "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}",
+                    local.tm_year + 1900,
+                    local.tm_mon + 1,
+                    local.tm_mday,
+                    local.tm_hour,
+                    local.tm_min,
+                    local.tm_sec
+                );
+                let mut collision = 0;
+                loop {
+                    let suffix = if collision == 0 {
+                        String::new()
+                    } else {
+                        format!("-{collision}")
+                    };
+                    let path = result.path.with_file_name(format!(
+                        "{}.ballast-{stamp}{suffix}.bak",
+                        result.path.file_name().unwrap().to_string_lossy()
+                    ));
+                    match fs::symlink_metadata(&path) {
+                        Ok(_) => collision += 1,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            result.backup = Some(path);
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
             }
         }
         Ok(result)
@@ -259,7 +285,7 @@ impl Installation {
                 purpose: if installing {
                     "Start a background service (runs as you, never root)"
                 } else {
-                    "Resume frozen work and stop the background service"
+                    "Resumes anything Ballast paused, then stops the service"
                 }
                 .into(),
                 detail: if installing {
@@ -268,7 +294,17 @@ impl Installation {
                         self.paths.base.display()
                     )
                 } else {
-                    "Always sweep for stopped marked work; recovery updates runtime state and logs. Data retained unless --purge was requested.".into()
+                    if purge {
+                        format!(
+                            "Deletes {} after resuming paused work",
+                            self.paths.base.display()
+                        )
+                    } else {
+                        format!(
+                            "Keeps {} (add --purge to delete it)",
+                            self.paths.base.display()
+                        )
+                    }
                 },
                 files: vec![service],
                 ..Item::default()
@@ -318,11 +354,11 @@ impl Installation {
                     }
                 ),
                 detail: if !changed {
-                    "Already set up; nothing to change".into()
+                    String::new()
                 } else if repair {
                     "Already set up; repairing hook paths or events".into()
                 } else {
-                    "Your other hooks and settings are kept".into()
+                    String::new()
                 },
                 files: vec![file],
             });

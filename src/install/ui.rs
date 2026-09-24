@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -113,7 +113,12 @@ pub(super) fn plan_text(plan: &Plan, home: &Path) -> String {
         for file in &item.files {
             text += &format!("     {}\n", file.path.display());
             if let Some(backup) = &file.backup {
-                text += &format!("     Backup: {}\n", backup.display());
+                text += &format!(
+                    "     Backup: {}\n",
+                    backup.file_name().unwrap().to_string_lossy()
+                );
+            } else if file.before.is_none() && file.after.is_some() {
+                text += "     Creates this file\n";
             }
         }
         if plan.operation == "install" && matches!(item.id.as_str(), "claude" | "codex") {
@@ -123,33 +128,33 @@ pub(super) fn plan_text(plan: &Plan, home: &Path) -> String {
                 "     + PreToolUse (Bash): holds heavy commands under memory pressure\n"
             };
             text += "     + PostToolUse (Bash): explains port collisions\n     + 4 lifecycle events: shows agent state in ballast top\n";
-            text += &format!(
-                "     {} existing {} kept.\n",
-                item.existing_hooks_kept,
-                if item.existing_hooks_kept == 1 {
-                    "hook is"
-                } else {
-                    "hooks are"
-                }
-            );
-            if item.id == "codex" {
-                text += "     Codex asks you to approve hooks once (/hooks).\n";
-            }
         }
-        text += &format!("     {}\n", item.detail);
+        if matches!(item.id.as_str(), "claude" | "codex") {
+            text += &match item.existing_hooks_kept {
+                0 => "     Keeps all your other settings\n".into(),
+                1 => "     Keeps your 1 other hook and all other settings\n".into(),
+                count => format!("     Keeps your {count} other hooks and all other settings\n"),
+            };
+        }
+        if !item.detail.is_empty() {
+            text += &format!("     {}\n", item.detail);
+        }
         if !item.changed {
             text += if plan.operation == "uninstall" && item.id == "service" {
-                "     No service file change; recovery still runs.\n"
+                "     Service already removed; checks for anything still paused.\n"
             } else {
                 "     Nothing needs changing.\n"
             };
+        }
+        if plan.operation == "install" && item.id == "codex" {
+            text += "     Approval needed: open Codex /hooks.\n";
         }
     }
     if plan.operation == "install" {
         if plan.items.iter().any(|i| i.id == "service" && !i.selected) {
             text += "\nWARNING: Nothing works without a running Ballast service.\n";
         }
-        text += "\nWhat it never does: send data anywhere, kill your own apps, or kill a running agent.\nUndo anytime: ballast uninstall\n";
+        text += "\nNever sends data anywhere, kills your own apps, or kills a running agent.\nUndo anytime: ballast uninstall\n";
     }
     text.replace(&format!("{}/", home.display()), "~/")
         .split('\n')
@@ -160,21 +165,45 @@ pub(super) fn plan_text(plan: &Plan, home: &Path) -> String {
 
 pub(super) fn wrapped(text: &str, width: u16) -> Vec<String> {
     let width = width.max(1);
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let height = paragraph.line_count(width).min(u16::MAX as usize) as u16;
-    let mut buffer = Buffer::empty(Rect::new(0, 0, width, height.max(1)));
-    paragraph.render(buffer.area, &mut buffer);
-    buffer
-        .content
-        .chunks(width as usize)
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-                .trim_end()
-                .to_owned()
-        })
-        .collect()
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let mut prefix = line.len() - line.trim_start_matches(' ').len();
+        for marker in ["+ ", "Backup: "] {
+            if line[prefix..].starts_with(marker) {
+                prefix += marker.len();
+                break;
+            }
+        }
+        if let Some((marker, _)) = line.split_once("] ") {
+            if marker
+                .trim_start()
+                .split_once(". [")
+                .is_some_and(|(number, _)| number.parse::<usize>().is_ok())
+            {
+                prefix = marker.len() + 2;
+            }
+        }
+        let indent = prefix.max(2).min(width.saturating_sub(1) as usize);
+        let body_width = width - indent as u16;
+        let paragraph = Paragraph::new(&line[prefix..]).wrap(Wrap { trim: false });
+        let height = paragraph.line_count(body_width).min(u16::MAX as usize) as u16;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, body_width, height.max(1)));
+        paragraph.render(buffer.area, &mut buffer);
+        for (row_index, row) in buffer.content.chunks(body_width as usize).enumerate() {
+            let content = row.iter().map(|cell| cell.symbol()).collect::<String>();
+            let leading = if row_index == 0 {
+                line[..prefix].to_owned()
+            } else {
+                " ".repeat(indent)
+            };
+            lines.push(
+                format!("{leading}{}", content.trim_end())
+                    .trim_end()
+                    .to_owned(),
+            );
+        }
+    }
+    lines
 }
 
 pub(super) fn print_text(text: &str) {
@@ -184,7 +213,22 @@ pub(super) fn print_text(text: &str) {
         .map(crate::cli::clean)
         .collect::<Vec<_>>()
         .join("\n");
-    for line in wrapped(&safe, width) {
+    let emphasize = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    for mut line in wrapped(&safe, width) {
+        if emphasize {
+            if line.trim_start().starts_with("Approval needed:") {
+                line = format!("\x1b[1m{line}\x1b[22m");
+            } else {
+                for command in [
+                    "ballast top",
+                    "ballast uninstall",
+                    "ballast install",
+                    " /hooks",
+                ] {
+                    line = line.replace(command, &format!("\x1b[1m{command}\x1b[22m"));
+                }
+            }
+        }
         println!("{line}");
     }
 }

@@ -3,7 +3,6 @@
 
 Run after cargo build --bin ballast. No real agent configs or service labels are used.
 """
-import html
 import json
 import os
 from pathlib import Path
@@ -45,9 +44,9 @@ def pane(name):
     return tm('capture-pane', '-p', '-t', name)
 
 
-def start(name, action='install', width=80, theme='dark', no_color=False):
-    env_args = [f'{key}={value}' for key, value in ENV.items() if key in ['HOME', 'BALLAST_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'BALLAST_SERVICE_DIR', 'BALLAST_SERVICE_LABEL']]
-    cmd = shlex.join(['env', '-u', 'NO_COLOR'] + env_args + (['NO_COLOR=1'] if no_color else []) + [str(BINARY), action])
+def start(name, action='install', width=80, theme='dark', no_color=False, environment=ENV):
+    env_args = [f'{key}={value}' for key, value in environment.items() if key in ['HOME', 'BALLAST_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'BALLAST_SERVICE_DIR', 'BALLAST_SERVICE_LABEL']]
+    cmd = shlex.join(['env', '-u', 'NO_COLOR', '-u', 'BALLAST_SERVICE_DIR', '-u', 'BALLAST_SERVICE_LABEL'] + env_args + (['NO_COLOR=1'] if no_color else []) + [str(BINARY), action])
     before, after, done = [HOME / f'{name}-{suffix}' for suffix in ['before', 'after', 'done']]
     shell = f'stty -g > {shlex.quote(str(before))}; {cmd}; result=$?; stty -g > {shlex.quote(str(after))}; echo "$result" > {shlex.quote(str(done))}; exec sleep 120'
     tm('new-session', '-d', '-s', name, '-x', str(width), '-y', '55', shell)
@@ -72,11 +71,8 @@ def capture(name, theme, width):
     text = pane(name).rstrip() + '\n'
     (OUT / f'{name}.txt').write_text(text)
     (OUT / f'{name}.ansi').write_text(tm('capture-pane', '-e', '-p', '-t', name).rstrip() + '\n')
-    lines = text.splitlines()
-    fg, bg = ('#252525', '#ffffff') if theme == 'light' else ('#dadada', '#000000')
-    spans = ''.join(f'<text x="20" y="{30 + i * 20}">{html.escape(line).replace(chr(32), "&#160;")}</text>' for i, line in enumerate(lines))
-    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width * 9 + 40}" height="{len(lines) * 20 + 40}" viewBox="0 0 {width * 9 + 40} {len(lines) * 20 + 40}"><title>Real Ballast {name} terminal capture</title><rect width="{width * 9 + 40}" height="{len(lines) * 20 + 40}" fill="{bg}"/><g fill="{fg}" font-family="Menlo, monospace" font-size="14">{spans}</g></svg>\n'
-    (OUT / f'{name}.svg').write_text(svg)
+    sp.run(['python3', str(ROOT / 'scripts/release/render-capture.py'),
+            str(OUT / f'{name}.ansi'), str(OUT / f'{name}.svg'), theme], check=True)
 
 
 def run(*args, expected=0):
@@ -86,13 +82,37 @@ def run(*args, expected=0):
 
 
 try:
-    for width in [60, 80, 120]:
-        for theme in ['light', 'dark']:
-            name = f'install-{theme}-{width}'
-            start(name, width=width, theme=theme)
-            capture(name, theme, width)
-            assert 'Undo anytime:' in pane(name)
-            finish(name)
+    # Capture default paths without ever loading the default service label.
+    with tempfile.TemporaryDirectory(prefix='bl-preview-', dir='/tmp') as directory:
+        preview_home = Path(directory)
+        preview_env = dict(ENV, HOME=directory, BALLAST_HOME=str(preview_home / '.ballast'),
+                           CLAUDE_CONFIG_DIR=str(preview_home / '.claude'), CODEX_HOME=str(preview_home / '.codex'))
+        for key in ['BALLAST_SERVICE_DIR', 'BALLAST_SERVICE_LABEL']:
+            preview_env.pop(key, None)
+        for agent in ['.claude', '.codex']:
+            (preview_home / agent).mkdir()
+        (preview_home / '.claude/settings.json').write_text((HOME / '.claude/settings.json').read_text())
+        for action in ['install', 'uninstall']:
+            for width in [60, 80, 120]:
+                for theme in ['light', 'dark']:
+                    name = f'{action}-{theme}-{width}'
+                    start(name, action=action, width=width, theme=theme, environment=preview_env)
+                    capture(name, theme, width)
+                    assert 'dev.ballast.daemon.plist' in pane(name)
+                    assert 'dev.ballast.flow.' not in pane(name)
+                    finish(name)
+            if action == 'install':
+                result = sp.run([str(BINARY), 'install', '--dry-run', '--json'], env=preview_env,
+                                text=True, capture_output=True, check=True)
+                # Materialize only the displayed files in the temporary home for the uninstall preview.
+                # Neither install nor uninstall is approved; no launchctl command changes service state.
+                for item in json.loads(result.stdout)['items']:
+                    for change in item['files']:
+                        path = Path(change['path'])
+                        assert path.is_relative_to(preview_home)
+                        if change['after'] is not None:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(change['after'])
     assert not (HOME / 'services').exists()
     assert not (HOME / '.codex/hooks.json').exists()
 
@@ -168,12 +188,6 @@ try:
     doctor = run('doctor', '--json', expected=1)
     assert next(check for check in doctor['checks'] if check['name'] == 'Codex trust')['status'] == 'action_required'
     transcript += ['$ ballast doctor --json', json.dumps(doctor, indent=2), 'Report: Hooks changed; restart the current agent session. Open Codex and approve the Ballast hooks yourself with /hooks.']
-    for width in [60, 80, 120]:
-        for theme in ['light', 'dark']:
-            name = f'uninstall-{theme}-{width}'
-            start(name, action='uninstall', width=width, theme=theme)
-            capture(name, theme, width)
-            finish(name)
     start('remove', action='uninstall')
     finish('remove', 'Enter', expected=0)
     assert run('uninstall', '--yes', '--json', expected=2)['status'] == 'no_change'

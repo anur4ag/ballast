@@ -69,8 +69,19 @@ fn config_round_trip_preserves_other_hooks_and_backs_up_only_changes() {
     for (path, agent) in fixture.0.config_files() {
         fixture.0.hooks_current(&path, agent).unwrap();
     }
+    for (path, _) in fixture.0.config_files() {
+        fs::write(
+            path.with_extension("json.ballast-1790292406716665000.bak"),
+            b"legacy backup",
+        )
+        .unwrap();
+    }
     fixture.merge(false);
     for (path, _) in fixture.0.config_files() {
+        assert_eq!(
+            fs::read(path.with_extension("json.ballast-1790292406716665000.bak")).unwrap(),
+            b"legacy backup"
+        );
         assert_eq!(ConfigEdit::read(path).unwrap().value, unrelated);
     }
     fixture.merge(false);
@@ -330,6 +341,22 @@ fn approved_plan_is_exact_and_rejects_later_changes_before_any_write() {
     let item = plan.items.iter().find(|i| i.id == "claude").unwrap();
     let file = &item.files[0];
     assert!(!file.backup.as_ref().unwrap().exists());
+    let backup_name = file
+        .backup
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let stamp = backup_name
+        .strip_prefix("settings.json.ballast-")
+        .unwrap()
+        .strip_suffix(".bak")
+        .unwrap();
+    assert_eq!(stamp.len(), 19);
+    assert_eq!(&stamp[10..11], "T");
+    assert_eq!(&stamp[4..5], "-");
     file.save().unwrap();
     assert_eq!(
         fs::read_to_string(&claude).unwrap(),
@@ -364,6 +391,33 @@ fn install_and_uninstall_plans_wrap_without_losing_content() {
             let condensed = |s: &str| s.split_whitespace().collect::<String>();
             assert_eq!(condensed(&lines.join("\n")), condensed(&text));
             assert!(lines.len() > 5);
+            for original in text.lines().filter(|line| line.starts_with("     ")) {
+                assert!(
+                    ui::wrapped(original, width)
+                        .iter()
+                        .all(|line| line.starts_with("     "))
+                );
+            }
+            let hook = ui::wrapped(
+                "     + PreToolUse (Bash, Monitor): holds heavy commands under memory pressure",
+                width,
+            );
+            assert!(hook.iter().skip(1).all(|line| line.starts_with("       ")));
+            let numbered = ui::wrapped(
+                "  1. [x] Resumes anything Ballast paused, then stops the service",
+                width,
+            );
+            assert!(
+                numbered
+                    .iter()
+                    .skip(1)
+                    .all(|line| line.starts_with("         "))
+            );
+            let footer = ui::wrapped(
+                "Never sends data anywhere, kills your own apps, or kills a running agent.",
+                width,
+            );
+            assert!(footer.iter().skip(1).all(|line| line.starts_with("  ")));
         }
     }
 }
