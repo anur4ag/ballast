@@ -781,3 +781,31 @@ fn socket_bind_startup_failure_is_written_to_daemon_log() {
     assert!(log.contains("daemon startup failed:"), "{log}");
     assert!(log.contains("path"), "{log}");
 }
+
+#[test]
+fn replacing_the_invoked_symlink_exits_cleanly_for_the_service_manager() {
+    let home = TempHome::new("replace");
+    std::fs::write(
+        home.path.join("config.toml"),
+        "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = []\n",
+    )
+    .unwrap();
+    let binary = home.path.join("ballast");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ballast"), &binary).unwrap();
+    let child = Command::new(&binary)
+        .arg("daemon")
+        .env("BALLAST_HOME", &home.path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = DaemonGuard { child, home };
+    daemon.wait_ready();
+    assert_eq!(daemon.status_request()["type"], "status");
+    let replacement = daemon.home.path.join("replacement");
+    std::fs::copy(env!("CARGO_BIN_EXE_ballast"), &replacement).unwrap();
+    let link = daemon.home.path.join("new-link");
+    std::os::unix::fs::symlink(&replacement, &link).unwrap();
+    std::fs::rename(link, binary).unwrap();
+    assert!(wait_exit(&mut daemon.child, Duration::from_secs(10)).success());
+}

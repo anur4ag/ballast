@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -44,7 +44,7 @@ impl Installation {
             paths: Paths {
                 base: env_path("BALLAST_HOME", Some(home.join(".ballast")))?,
             },
-            binary: std::env::current_exe()?,
+            binary: invoked_binary()?,
             claude_dir: env_path("CLAUDE_CONFIG_DIR", Some(home.join(".claude")))?,
             codex_dir: env_path("CODEX_HOME", Some(home.join(".codex")))?,
             service_dir: env_path("BALLAST_SERVICE_DIR", Some(service_default))?,
@@ -104,9 +104,9 @@ impl Installation {
 
     fn hook_group(&self, event: &str, agent: &str) -> Value {
         let command = format!(
-            "env BALLAST_HOME={} {} hook {agent}{MARKER}",
+            "if [ -x {binary} ]; then exec env BALLAST_HOME={} {binary} hook {agent}; fi{MARKER}",
             shell_quote(&self.paths.base),
-            shell_quote(&self.binary)
+            binary = shell_quote(&self.binary)
         );
         let mut hook = json!({"type": "command", "command": command, "timeout": if event == "PreToolUse" {600} else {1}});
         if event == "PreToolUse" {
@@ -364,6 +364,19 @@ impl Installation {
                 println!("FAIL {name}: {fix}");
             }
         };
+        println!(
+            "OK install method: {} ({})",
+            self.install_method(),
+            self.binary.display()
+        );
+        check(
+            "stable binary path",
+            if self.binary.components().any(|c| c.as_os_str() == "Cellar") {
+                Err("versioned Homebrew Cellar path; run `ballast install` through the Homebrew bin symlink".into())
+            } else {
+                Ok("preserved across package upgrades")
+            },
+        );
         check(
             "user service",
             if read_regular(&self.service_file())
@@ -375,7 +388,7 @@ impl Installation {
                 Ok("installed and loaded")
             } else {
                 Err(
-                    "run `ballast install` from the current binary in a logged-in user session"
+                    "missing or outdated service (including versioned Cellar paths); run `ballast install` through the stable bin path in a logged-in user session"
                         .into(),
                 )
             },
@@ -477,6 +490,23 @@ impl Installation {
         healthy
     }
 
+    fn install_method(&self) -> &'static str {
+        if fs::canonicalize(&self.binary)
+            .is_ok_and(|p| p.components().any(|c| c.as_os_str() == "Cellar"))
+        {
+            "Homebrew"
+        } else if self.binary == Path::new("/usr/bin/ballast")
+            && Command::new("dpkg-query")
+                .args(["-S", "/usr/bin/ballast"])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        {
+            "APT"
+        } else {
+            "manual"
+        }
+    }
+
     fn hooks_current(&self, path: &Path, agent: &str) -> io::Result<()> {
         let config = ConfigEdit::read(path.to_owned())?.value;
         if config.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
@@ -498,7 +528,7 @@ impl Installation {
                     != 1
             {
                 return Err(io::Error::other(
-                    "missing, duplicate or outdated Ballast hook",
+                    "missing, duplicate or outdated Ballast hook (including versioned Cellar paths)",
                 ));
             }
         }
@@ -559,6 +589,38 @@ impl Installation {
         }
         Ok(())
     }
+}
+
+// current_exe resolves Homebrew's versioned Cellar symlink on both supported platforms.
+pub(crate) fn invoked_binary() -> io::Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let invoked = std::env::args_os().next().unwrap_or_default();
+    let candidate = resolve_invocation(
+        Path::new(&invoked),
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )?;
+    // argv[0] can be supplied by a launcher; only trust a path to the running executable.
+    let actual = fs::metadata(&executable)?;
+    Ok(candidate
+        .filter(|p| {
+            fs::metadata(p).is_ok_and(|m| m.dev() == actual.dev() && m.ino() == actual.ino())
+        })
+        .unwrap_or(executable))
+}
+
+fn resolve_invocation(
+    invoked: &Path,
+    search_path: &std::ffi::OsStr,
+) -> io::Result<Option<PathBuf>> {
+    let cwd = std::env::current_dir()?;
+    if invoked.components().count() > 1 || invoked.is_absolute() {
+        return Ok(Some(cwd.join(invoked)));
+    }
+    Ok(std::env::split_paths(search_path)
+        .map(|dir| cwd.join(dir).join(invoked))
+        .find(|p| {
+            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        }))
 }
 
 fn env_path(name: &str, fallback: Option<PathBuf>) -> io::Result<PathBuf> {

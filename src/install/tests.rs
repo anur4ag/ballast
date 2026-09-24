@@ -187,14 +187,26 @@ fn hook_command_survives_shell_metacharacters_and_sets_the_selected_home() {
     fs::set_permissions(&fixture.0.binary, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir_all(&fixture.0.paths.base).unwrap();
     let group = fixture.0.hook_group("PreToolUse", "codex");
-    assert!(
+    let run = || {
         Command::new("sh")
             .arg("-c")
             .arg(group["hooks"][0]["command"].as_str().unwrap())
-            .status()
+            .output()
             .unwrap()
-            .success()
-    );
+    };
+    assert!(run().status.success());
+    fs::write(
+        &fixture.0.binary,
+        b"#!/bin/sh\nprintf pass-through\nexit 23\n",
+    )
+    .unwrap();
+    let output = run();
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(output.stdout, b"pass-through");
+    fs::remove_file(&fixture.0.binary).unwrap();
+    let output = run();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
 }
 
 #[test]
@@ -279,5 +291,29 @@ fn systemd_restarts_are_unlimited_with_bounded_backoff() {
         "RestartMaxDelaySec=30\n",
     ] {
         assert!(service.contains(directive));
+    }
+}
+
+#[test]
+fn invoked_path_keeps_the_symlink_across_a_cellar_upgrade() {
+    let fixture = Fixture::new();
+    let bin = fixture.0.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let link = bin.join("ballast");
+    for version in ["1", "2"] {
+        let target = fixture
+            .0
+            .home
+            .join(format!("Cellar/ballast/{version}/ballast"));
+        atomic_write(&target, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for invoked in [Path::new("ballast"), link.as_path()] {
+            assert_eq!(
+                resolve_invocation(invoked, bin.as_os_str()).unwrap(),
+                Some(link.clone())
+            );
+        }
     }
 }
