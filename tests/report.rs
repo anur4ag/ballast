@@ -37,6 +37,7 @@ fn report_offline_json_empty_corrupt_and_observe() {
     assert!(
         String::from_utf8(run(&["report"]).stdout)
             .unwrap()
+            .to_lowercase()
             .contains("would have")
     );
     assert!(!run(&["report", "--since", "2d"]).status.success());

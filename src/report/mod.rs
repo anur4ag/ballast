@@ -87,6 +87,9 @@ pub struct Counts {
     pub holds: u64,
     pub median_wait_seconds: Option<u16>,
     pub reclaimed_memory_bytes: u64,
+    pub reclaimed_processes: u64,
+    pub services_left_running: u64,
+    pub forced_resumes: u64,
     pub kills_blocked: u64,
 }
 impl From<&Totals> for Counts {
@@ -96,6 +99,9 @@ impl From<&Totals> for Counts {
             holds: t.holds,
             median_wait_seconds: t.median_wait(),
             reclaimed_memory_bytes: t.reclaimed_memory_bytes,
+            reclaimed_processes: t.reclaimed_processes,
+            services_left_running: t.services_left_running,
+            forced_resumes: t.forced_resumes,
             kills_blocked: t.kills_blocked,
         }
     }

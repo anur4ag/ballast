@@ -182,4 +182,4 @@ A pending comparison is stored as `critical->unknown`; restart leaves it unknown
 These comparisons show correlation, not causation.
 
 The on-disk object is `{schema_version, updated_at_ms, days}` with the same daily aggregates.
-Snapshot adds defaulted `today: {day, enforce, observe}`; each mode contains `freezes`, `holds`, nullable `median_wait_seconds`, `reclaimed_memory_bytes`, and `kills_blocked`.
+Snapshot adds defaulted `today: {day, enforce, observe}`; each mode contains `freezes`, `holds`, nullable `median_wait_seconds`, `reclaimed_memory_bytes`, `reclaimed_processes`, `services_left_running`, `forced_resumes`, and `kills_blocked`.
