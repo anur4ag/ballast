@@ -325,7 +325,7 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
             color,
         ),
         Span::raw(format!(
-            "  {:?}  ·  {} frozen  {} held",
+            " · {:?} · {} frozen · {} held",
             s.status.mode,
             s.frozen.len(),
             s.held.len()
@@ -385,12 +385,12 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
         }
         if p.kernel_pressure_level.is_some() {
             inputs.push(format!(
-                "pageout {} · swapout {} MiB/s",
+                "pageout {} MiB/s · swapout {} MiB/s",
                 number(s.guardian.as_ref().and_then(|n| n.pageout_mib_per_sec)),
                 number(s.guardian.as_ref().and_then(|n| n.swapout_mib_per_sec))
             ));
         }
-        header.push(Line::from(inputs.join("  ·  ")));
+        header.push(Line::from(inputs.join(" · ")));
     }
     if let Some(error) = error {
         header.push(Line::from(accent(clean(error), CRITICAL)));
@@ -444,8 +444,24 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
     let header = Paragraph::new(view.header.clone()).wrap(Wrap { trim: false });
     let header_height = (header.line_count(area.width) as u16).min(area.height.saturating_sub(3));
     frame.render_widget(header, Rect::new(0, 0, area.width, header_height));
-    let paragraph = Paragraph::new(view.lines.clone()).wrap(Wrap { trim: false });
-    let count = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
+    let mut body = view.lines.clone();
+    let mut paragraph = Paragraph::new(body.clone()).wrap(Wrap { trim: false });
+    let mut count = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
+    let fleet = body
+        .iter()
+        .position(|line| line.to_string().starts_with("FLEET  "));
+    let gaps = 1 + u16::from(fleet.is_some_and(|index| index > 0));
+    if (64..110).contains(&area.width)
+        && u32::from(header_height) + u32::from(count) + u32::from(gaps) + 3
+            <= u32::from(area.height)
+    {
+        if let Some(index) = fleet.filter(|index| *index > 0) {
+            body.insert(index, Line::default());
+        }
+        body.insert(0, Line::default());
+        paragraph = Paragraph::new(body).wrap(Wrap { trim: false });
+        count += gaps;
+    }
     let height = area.height.saturating_sub(header_height + 3).min(count);
     *scroll = (*scroll).min(count.saturating_sub(height));
     frame.render_widget(
@@ -456,10 +472,10 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
         vec![
             Line::from("─".repeat(area.width as usize)),
             Line::from(
-                "q quit  j/k scroll  PgUp/PgDn  Home/End   ·   CPU: one core = 100%   ? unknown   ~ partial",
+                "q quit  j/k scroll  PgUp/PgDn  Home/End · CPU: one core = 100% · ? unknown · ~ partial",
             ),
             Line::from(format!(
-                "ballast resume <id>|--all  ·  ballast stop <id>  ·  rows {}-{} / {count}",
+                "ballast resume <id>|--all · ballast stop <id> · rows {}-{} / {count}",
                 scroll.saturating_add(1).min(count),
                 scroll.saturating_add(height).min(count)
             )),
@@ -468,9 +484,9 @@ fn render(frame: &mut Frame, view: &View, scroll: &mut u16) {
         vec![
             Line::from("─".repeat(area.width as usize)),
             Line::from(
-                "q quit  j/k scroll  g/G start/end  ·  CPU 100%=1 core  ? unknown  ~ partial",
+                "q quit  j/k scroll  g/G start/end · CPU 100%=1 core · ? unknown · ~ partial",
             ),
-            Line::from("ballast resume <id>|--all  ·  ballast stop <id>"),
+            Line::from("ballast resume <id>|--all · ballast stop <id>"),
         ]
     };
     frame.render_widget(
@@ -574,8 +590,17 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
     )));
     let wide = width >= 110;
     let widths = if wide {
-        let id = ((width as usize - 80) / 2).clamp(20, 40);
-        vec![10, 7, 7, 11, 7, id, width as usize - 48 - id]
+        let id = s
+            .attribution
+            .agents
+            .iter()
+            .map(|a| &a.id)
+            .chain(s.attribution.workloads.iter().map(|w| &w.id))
+            .map(|id| Line::from(clean(id)).width())
+            .max()
+            .unwrap_or(2)
+            .clamp(2, 40);
+        vec![10, 7, 7, 11, 7, width as usize - 48 - id, id]
     } else if width >= 64 {
         vec![8, 6, 7, 7, 6, width as usize - 39]
     } else {
@@ -583,7 +608,7 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
     };
     if !widths.is_empty() {
         let headers = if wide {
-            vec!["STATE", "CLASS", "CPU%", "MEM", "AGE", "ID", "LABEL"]
+            vec!["STATE", "CLASS", "CPU%", "MEM", "AGE", "LABEL", "ID"]
         } else {
             vec!["STATE", "CLASS", "CPU%", "MEM", "AGE", "WORKLOAD / ID"]
         };
@@ -606,21 +631,35 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
     let mut agents: Vec<_> = s.attribution.agents.iter().collect();
     agents.sort_by_key(|a| (&a.owner_id, &a.id));
     let mut last_owner = None;
-    for agent in agents {
+    for (agent_index, agent) in agents.iter().enumerate() {
+        let has_sibling = agents
+            .get(agent_index + 1)
+            .is_some_and(|next| next.owner_id == agent.owner_id);
+        let branch = if has_sibling { "├" } else { "└" };
         if last_owner != Some(&agent.owner_id) {
             let owner = s
                 .attribution
                 .owners
                 .iter()
                 .find(|o| Some(&o.id) == agent.owner_id.as_ref());
-            out.push(heading(format!(
+            let name = format!(
                 "▾ {}",
                 clean(
                     owner
                         .map(|o| o.name.as_deref().unwrap_or(&o.id))
                         .unwrap_or_else(|| agent.owner_id.as_deref().unwrap_or("unassigned"))
                 )
-            )));
+            );
+            if widths.is_empty() {
+                out.push(heading(name));
+            } else {
+                let mut values = vec![String::new(); 5];
+                values.push(name);
+                if wide {
+                    values.push(String::new());
+                }
+                out.push(row(&values, &widths, true, None));
+            }
             last_owner = Some(&agent.owner_id);
         }
         let percent = cpu.total(
@@ -638,13 +677,13 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
             "-".into(),
         ];
         if wide {
-            values.extend([agent.id.clone(), format!("└ {}", agent.kind)]);
+            values.extend([format!("{branch} {}", agent.kind), agent.id.clone()]);
         } else {
-            values.push(format!("└ {} [{}]", agent.kind, agent.id));
+            values.push(format!("{branch} {} [{}]", agent.kind, agent.id));
         }
         if widths.is_empty() {
             out.push(heading(format!(
-                "{} [{}] {}  {}% {}",
+                "{branch} {} [{}] {}  {}% {}",
                 clean(&agent.kind),
                 values[0],
                 clean(&agent.id),
@@ -661,7 +700,16 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
             .filter(|w| w.agent_id == agent.id)
             .collect();
         workloads.sort_by_key(|w| &w.id);
-        for w in workloads {
+        for (work_index, w) in workloads.iter().enumerate() {
+            let prefix = format!(
+                "{} {}",
+                if has_sibling { "│" } else { " " },
+                if work_index + 1 == workloads.len() {
+                    "└"
+                } else {
+                    "├"
+                }
+            );
             let percent = cpu.total(
                 s.attribution
                     .processes
@@ -683,20 +731,24 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
                 age(now, w.first_seen_ms),
             ];
             if wide {
-                values.extend([w.id.clone(), format!("  └ {}", w.label)]);
+                values.extend([format!("{prefix} {}", w.label), w.id.clone()]);
             } else {
-                values.push(format!("  {} [{}]", w.label, w.id));
+                values.push(format!("{prefix} {} [{}]", w.label, w.id));
             }
             if widths.is_empty() {
                 out.push(Line::from(vec![
-                    accent(format!("  {state}"), if frozen { FROZEN } else { NORMAL }),
+                    accent(
+                        format!("{prefix} {state}"),
+                        if frozen { FROZEN } else { NORMAL },
+                    ),
                     Span::raw(format!(
                         " {} {}% {} {}",
                         values[1], values[2], values[3], values[4]
                     )),
                 ]));
                 out.push(Line::from(format!(
-                    "  {} [{}]",
+                    "{}  {} [{}]",
+                    if has_sibling { "│" } else { " " },
                     clean(&w.label),
                     clean(&w.id)
                 )));

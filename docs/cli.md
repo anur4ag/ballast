@@ -10,8 +10,11 @@ External SIGTERM, SIGINT and SIGHUP exit through terminal restoration.
 Colors inherit the terminal's foreground and background, with semantic accents: green Normal, ochre Elevated, red Critical, blue frozen and magenta held.
 `NO_COLOR` disables accents; state labels remain explicit.
 Unchanged views skip drawing, and Ratatui sends changed cells only.
-At 110 columns the fleet uses separate state, class, CPU, memory, age, ID and label columns.
+At 110 columns the fleet uses separate state, class, CPU, memory, age, tree label and ID columns.
+The final ID column follows the longest fleet identifier, capped at 40 cells; labels use the remaining width.
 From 64 columns it combines workload labels and IDs; smaller terminals stack metrics.
+Agent and workload branches retain sibling continuations.
+Compact layouts separate sections with blank lines when the entire view fits; short terminals drop those gaps first.
 Text clips at grapheme boundaries; full IDs remain available through `ps`.
 Memory and swap meters show used/total; a zero swap total displays `no swap`.
 

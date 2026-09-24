@@ -296,3 +296,57 @@ fn top_projection_keeps_machine_totals_and_only_fleet_metrics() {
     assert_eq!(projected.held.len(), 1);
     assert_eq!(projected.frozen.len(), 1);
 }
+
+#[test]
+fn fleet_tree_columns_and_optional_section_gaps() {
+    let mut s = snapshot();
+    let mut agent = s.attribution.agents[0].clone();
+    agent.id = "agent-b".into();
+    agent.kind = "claude".into();
+    s.attribution.agents.push(agent);
+    let mut work = s.attribution.workloads[0].clone();
+    work.id = "w-next".into();
+    work.label = "next".into();
+    s.attribution.workloads.push(work.clone());
+    work.id = "w-last".into();
+    work.agent_id = "agent-b".into();
+    work.label = "last".into();
+    s.attribution.workloads.push(work);
+    for width in [80, 160] {
+        let screen = render(&s, width, 40, &mut 0);
+        for text in [
+            "├ codex",
+            "│ ├ synthetic build",
+            "│ └ next",
+            "└ claude",
+            "  └ last",
+        ] {
+            assert!(screen.contains(text), "{width}: {text}: {screen}");
+        }
+        assert!(screen.contains("kernel critical · pageout 12.5 MiB/s · swapout 300.0 MiB/s"));
+        assert!(!screen.contains("  ·"));
+        if width == 160 {
+            let header = screen
+                .lines()
+                .find(|line| line.starts_with("STATE"))
+                .unwrap();
+            let label = header.find("LABEL").unwrap();
+            assert_eq!(header.find("ID"), Some(153));
+            for text in ["▾ Test fleet", "├ codex", "│ ├ synthetic build"] {
+                let line = screen.lines().find(|line| line.contains(text)).unwrap();
+                assert_eq!(line.find(text), Some(label));
+            }
+        } else {
+            let lines: Vec<_> = screen.lines().collect();
+            for text in ["PAUSED & WAITING", "FLEET  "] {
+                let index = lines
+                    .iter()
+                    .position(|line| line.starts_with(text))
+                    .unwrap();
+                assert!(lines[index - 1].is_empty());
+            }
+        }
+    }
+    let short = render(&s, 80, 12, &mut 0);
+    assert!(!short.contains("\n\n"), "{short}");
+}
