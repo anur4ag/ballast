@@ -213,7 +213,7 @@ impl Drop for Harness {
 }
 
 #[test]
-fn grace_reclaims_batch_and_internal_but_reports_service_once() {
+fn grace_reclaims_batch_and_internal_then_reports_one_combined_session_summary() {
     let mut h = Harness::new(Mode::Enforce);
     let mut s = snapshot();
     let mut p = Fake::default();
@@ -221,34 +221,169 @@ fn grace_reclaims_batch_and_internal_but_reports_service_once() {
     s.status.sampled_at_ms = 30999;
     h.tick(now, &s, &p);
     assert!(p.signals.borrow().is_empty());
+    assert!(p.notifications.borrow().is_empty());
     s.status.sampled_at_ms = 31000;
     h.tick(now, &s, &p);
     let mut signalled: Vec<_> = p.signals.borrow().iter().map(|(id, _)| id.pid).collect();
     signalled.sort_unstable();
     assert_eq!(signalled, [20, 21, 40]);
-    assert!(p.notifications.borrow()[0].contains("8080"));
-    assert!(p.notifications.borrow()[0].contains("ballast stop service"));
+    // The batch/internal termination is still pending, so the ended-session
+    // summary waits rather than notifying about the surviving service alone.
+    assert!(p.notifications.borrow().is_empty());
     h.tick(now + Duration::from_secs(4), &s, &p);
     assert_eq!(p.signals.borrow().len(), 3);
+    assert!(p.notifications.borrow().is_empty());
     p.gone.extend([id(20), id(21), id(40)]);
     s.attribution
         .processes
         .retain(|a| !p.gone.contains(&a.identity));
     h.tick(now + Duration::from_secs(5), &s, &p);
+    let notifications = p.notifications.borrow();
     assert_eq!(
-        p.notifications
-            .borrow()
-            .iter()
-            .filter(|n| n.contains("survives"))
-            .count(),
-        1
+        notifications.len(),
+        1,
+        "reclaimed work and the surviving service are one summary, not one per kind"
     );
-    assert!(
-        p.notifications
-            .borrow()
+    let body = &notifications[0];
+    assert!(body.contains("Reclaimed 2 leftovers"));
+    assert!(body.contains("`batch`"));
+    assert!(body.contains("background helpers"));
+    assert!(body.contains("an ended agent session"));
+    assert!(body.contains("8080"));
+    assert!(body.contains("ballast stop "));
+}
+
+fn two_agent_snapshot() -> Snapshot {
+    let agent = |name: &str, root_pid: i32| Agent {
+        id: name.into(),
+        root: Some(id(root_pid)),
+        state: AgentState::Ended,
+        ended_at_ms: Some(1000),
+        kind: "generic".into(),
+        session_id: None,
+        owner_id: None,
+        cwd: None,
+        memory: MemorySummary::default(),
+    };
+    let workload = |name: &str, agent_id: &str, root_pid: i32| Workload {
+        id: name.into(),
+        agent_id: agent_id.into(),
+        root: id(root_pid),
+        class: WorkloadClass::Batch,
+        label: name.into(),
+        first_seen_ms: 0,
+        detached_pgid: None,
+        memory: MemorySummary::default(),
+    };
+    let member = |pid: i32, agent_id: &str, workload: &str| ProcessAttribution {
+        identity: id(pid),
+        role: ProcessRole::Workload,
+        workload_id: Some(workload.into()),
+        agent_id: Some(agent_id.into()),
+        owner_id: None,
+        environment_known: true,
+        listening_ports: Some(Vec::new()),
+        ports_sampled_at_ms: Some(1000),
+    };
+    let attribution = AttributionSnapshot {
+        agents: vec![agent("a", 10), agent("b", 110)],
+        workloads: vec![workload("batch-a", "a", 20), workload("batch-b", "b", 120)],
+        processes: vec![
+            member(20, "a", "batch-a"),
+            member(21, "a", "batch-a"),
+            member(120, "b", "batch-b"),
+            member(121, "b", "batch-b"),
+        ],
+        ..AttributionSnapshot::default()
+    };
+    Snapshot {
+        processes: attribution
+            .processes
             .iter()
-            .any(|n| n.contains("Reclaimed"))
+            .map(|p| Process {
+                identity: p.identity,
+                ppid: 1,
+                pgid: p.identity.pid,
+                uid: unsafe { libc::geteuid() },
+                stopped: false,
+                name: None,
+                exe: Some("/bin/node".into()),
+                argv: None,
+                metrics: None,
+            })
+            .collect(),
+        attribution,
+        status: Status {
+            daemon_version: "test".into(),
+            pid: 1,
+            mode: Mode::Enforce,
+            tick: 1,
+            sampled_at_ms: 31000,
+            tick_interval_ms: 1000,
+            tick_cpu_ns: 0,
+            tick_wall_ns: 0,
+            sample_discarded: false,
+            process_count: 4,
+            pressure_level: Level::Normal,
+            batch_running: true,
+            cleanup_pending: Vec::new(),
+            last_error: None,
+        },
+        boot_id: "test".into(),
+        capabilities: Fake::default().capabilities(),
+        changes: ProcessChanges::default(),
+        pressure: None,
+        frozen: vec![],
+        held: Vec::new(),
+        guardian: None,
+    }
+}
+
+#[test]
+fn two_ended_sessions_finishing_together_both_eventually_notify() {
+    let mut h = Harness::new(Mode::Enforce);
+    let mut s = two_agent_snapshot();
+    let mut p = Fake::default();
+    let now = Instant::now();
+
+    // Both agents' batch work is scheduled and signalled in the same tick.
+    h.tick(now, &s, &p);
+    assert_eq!(p.signals.borrow().len(), 4);
+    assert!(p.notifications.borrow().is_empty());
+
+    // Both terminations are confirmed gone in the same tick, so both sessions
+    // become notify-ready together; the shared per-kind rate limit lets only
+    // one summary through.
+    p.gone.extend([id(20), id(21), id(120), id(121)]);
+    s.attribution
+        .processes
+        .retain(|a| !p.gone.contains(&a.identity));
+    h.tick(now, &s, &p);
+    assert_eq!(
+        p.notifications.borrow().len(),
+        1,
+        "the shared per-kind rate limit lets only one session through per window"
     );
+
+    // Agent "b" is fully pruned from the snapshot, as the daemon does once
+    // there is nothing left of it to attribute, and its termination is
+    // already gone from `pending`. Its not-yet-notified session must survive
+    // that pruning rather than being discarded before it can ever notify.
+    s.attribution.agents.retain(|a| a.id != "b");
+    s.attribution.workloads.retain(|w| w.agent_id != "b");
+
+    // Still inside the shared rate-limit window: no second summary yet, but
+    // the retained session is not lost either.
+    h.tick(now + Duration::from_secs(30), &s, &p);
+    assert_eq!(p.notifications.borrow().len(), 1);
+
+    // Once the shared per-kind rate limit clears, the retained session
+    // finally gets its summary.
+    h.tick(now + Duration::from_secs(61), &s, &p);
+    let notifications = p.notifications.borrow();
+    assert_eq!(notifications.len(), 2);
+    assert!(notifications.iter().any(|n| n.contains("`batch-a`")));
+    assert!(notifications.iter().any(|n| n.contains("`batch-b`")));
 }
 
 #[test]
@@ -299,6 +434,25 @@ fn stop_includes_services_excludes_roots_and_internals_and_escalates_survivors()
         .collect();
     killed.sort_unstable();
     assert_eq!(killed, [20, 30]);
+}
+
+#[test]
+fn stop_resolves_a_short_workload_handle_and_rejects_an_unknown_one() {
+    let mut h = Harness::new(Mode::Enforce);
+    let s = snapshot();
+    let p = Fake::default();
+    let handle = WorkloadHandles::for_snapshot(&s).get("batch").to_owned();
+    // A short handle (not the full workload id, and not an agent id) resolves
+    // to exactly the one workload it names.
+    let report = h.request(Some(&handle), &s, &p);
+    assert_eq!(report.scheduled, ["batch"]);
+    assert_eq!(p.signals.borrow().len(), 2);
+
+    let err = h
+        .cleanup
+        .request(Some("zzzzzz"), &s, &mut h.guardian, &p, &mut h.log)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
 }
 
 #[test]

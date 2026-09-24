@@ -1,4 +1,4 @@
-use super::{age, bytes, clean, number};
+use super::{age, bytes, clean, count, number};
 use crate::daemon::{
     Snapshot,
     files::Paths,
@@ -234,9 +234,7 @@ fn accent(text: impl Into<String>, color: Color) -> Span<'static> {
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
 }
-fn count(n: usize, name: &str) -> String {
-    format!("{n} {name}{}", if n == 1 { "" } else { "s" })
-}
+
 fn cell(text: &str, width: usize, right: bool) -> String {
     let text = clean(text);
     let clipped = Line::from(text.as_str()).width() > width;
@@ -535,6 +533,7 @@ fn row(
 
 fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
     let mut out = Vec::new();
+    let handles = crate::attribution::WorkloadHandles::for_snapshot(s);
     let observe = matches!(s.status.mode, crate::daemon::files::Mode::Observe);
     if !s.frozen.is_empty() || !s.held.is_empty() {
         out.push(heading("PAUSED & WAITING"));
@@ -548,7 +547,7 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
             let name = agent
                 .map(|a| format!("{}/{}", a.kind, a.id))
                 .unwrap_or_else(|| "unknown agent".into());
-            let label = work.map_or(frozen.workload_id.as_str(), |w| &w.label);
+            let label = work.map_or("workload", |w| w.label.as_str());
             out.push(Line::from(vec![
                 accent(
                     if observe {
@@ -559,7 +558,8 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
                     FROZEN,
                 ),
                 Span::raw(format!(
-                    "{}  {}  {}  {}",
+                    "[{}] {}  {}  {}  {}",
+                    handles.get(&frozen.workload_id),
                     clean(&name),
                     clean(label),
                     age(now, frozen.frozen_at_ms),
@@ -593,9 +593,9 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
     }
     out.push(heading(format!(
         "FLEET  {} · {} · {}",
-        count(s.attribution.owners.len(), "owner"),
-        count(s.attribution.agents.len(), "agent"),
-        count(s.attribution.workloads.len(), "workload")
+        count(s.attribution.owners.len(), "owner", "owners"),
+        count(s.attribution.agents.len(), "agent", "agents"),
+        count(s.attribution.workloads.len(), "workload", "workloads")
     )));
     let wide = width >= 110;
     let widths = if wide {
@@ -603,8 +603,8 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
             .attribution
             .agents
             .iter()
-            .map(|a| &a.id)
-            .chain(s.attribution.workloads.iter().map(|w| &w.id))
+            .map(|a| a.id.as_str())
+            .chain(s.attribution.workloads.iter().map(|w| handles.get(&w.id)))
             .map(|id| Line::from(clean(id)).width())
             .max()
             .unwrap_or(2)
@@ -740,9 +740,12 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
                 age(now, w.first_seen_ms),
             ];
             if wide {
-                values.extend([format!("{prefix} {}", w.label), w.id.clone()]);
+                values.extend([
+                    format!("{prefix} {}", w.label),
+                    handles.get(&w.id).to_owned(),
+                ]);
             } else {
-                values.push(format!("{prefix} {} [{}]", w.label, w.id));
+                values.push(format!("{prefix} [{}] {}", handles.get(&w.id), w.label));
             }
             if widths.is_empty() {
                 out.push(Line::from(vec![
@@ -756,10 +759,10 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
                     )),
                 ]));
                 out.push(Line::from(format!(
-                    "{}  {} [{}]",
+                    "{}  [{}] {}",
                     if has_sibling { "│" } else { " " },
-                    clean(&w.label),
-                    clean(&w.id)
+                    handles.get(&w.id),
+                    clean(&w.label)
                 )));
             } else {
                 out.push(row(&values, &widths, false, frozen.then_some(FROZEN)));

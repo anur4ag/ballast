@@ -448,9 +448,14 @@ impl Installation {
                     },
                 );
                 if notify {
-                    check("notifications", match platform.notify("Ballast doctor", "Ballast test notification") {
+                    let enabled = crate::daemon::files::Config::load(&self.paths)
+                        .map(|config| config.notifications);
+                    check("notifications", match enabled.and_then(|enabled| {
+                        platform.notifications = enabled;
+                        platform.notify("Ballast", &crate::notifications::sample())
+                    }) {
                         Ok(true) => Ok("submitted; confirm visible delivery on your desktop"),
-                        Ok(false) => Err("unavailable; enable desktop notifications or install notify-send on Linux".into()),
+                        Ok(false) => Err("disabled or unavailable; check notifications in config.toml and desktop permissions".into()),
                         Err(e) => Err(format!("{e}; check notification permissions and desktop session")),
                     });
                 } else {

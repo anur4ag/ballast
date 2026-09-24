@@ -1,10 +1,12 @@
 mod display;
+mod handles;
 mod model;
 mod registry;
 mod roots;
 #[cfg(test)]
 mod tests;
 pub use display::format_ps;
+pub use handles::WorkloadHandles;
 pub use model::*;
 pub use registry::{Marker, MarkerLevel};
 use registry::{agent_kind, binary, binary_candidate_kind, builtin_shells};

@@ -221,6 +221,8 @@ pub struct Guardian {
     resumed_this_tick: HashSet<ProcessIdentity>,
     notifications: HashMap<&'static str, Instant>,
     last_stand_down: Option<&'static str>,
+    episode_notified: bool,
+    descriptions: HashMap<String, crate::notifications::Work>,
     evidence: serde_json::Value,
 }
 impl Guardian {
@@ -242,6 +244,8 @@ impl Guardian {
             resumed_this_tick: HashSet::new(),
             notifications: HashMap::new(),
             last_stand_down: None,
+            episode_notified: false,
+            descriptions: HashMap::new(),
             evidence: serde_json::Value::Null,
         }
     }
@@ -297,6 +301,16 @@ impl Guardian {
         log: &mut RotatingLog,
     ) -> io::Result<()> {
         self.resumed_this_tick.clear();
+        self.descriptions
+            .retain(|id, _| self.frozen.iter().any(|w| &w.workload_id == id));
+        for workload in &snapshot.attribution.workloads {
+            if self.frozen.iter().any(|w| w.workload_id == workload.id) {
+                self.descriptions.insert(
+                    workload.id.clone(),
+                    crate::notifications::Work::from_snapshot(snapshot, workload),
+                );
+            }
+        }
         let previous = self.level;
         self.level = self
             .pressure
@@ -333,6 +347,9 @@ impl Guardian {
                 "pressure_transition",
                 serde_json::json!({"from": previous, "to": self.level}),
             );
+        }
+        if self.level == Level::Normal {
+            self.episode_notified = false;
         }
         self.ineligible.retain(|_, until| now < *until);
         let expired: Vec<_> = self
@@ -470,17 +487,21 @@ impl Guardian {
                 } else {
                     "Paused"
                 },
-                victim.id
+                crate::notifications::label(&victim.label)
             ),
         );
         self.record(log, "freeze", serde_json::json!({"workload_id": victim.id}));
-        self.notify(
-            "freeze",
-            "Paused an agent workload to relieve memory pressure.",
-            now,
-            platform,
-            log,
-        );
+        if !self.episode_notified {
+            let description = crate::notifications::Work::from_snapshot(snapshot, victim);
+            self.notify(
+                "freeze",
+                &crate::notifications::paused(&description),
+                now,
+                platform,
+                log,
+            );
+            self.episode_notified = true;
+        }
         Ok(())
     }
     fn explain(&mut self, kind: &str, message: &str) {
@@ -529,6 +550,10 @@ impl Guardian {
         if members.is_empty() {
             return Err(io::Error::other("workload has no observable members"));
         }
+        self.descriptions.insert(
+            victim.id.clone(),
+            crate::notifications::Work::from_snapshot(snapshot, victim),
+        );
         self.frozen.push(FrozenWorkload {
             workload_id: victim.id.clone(),
             root: victim.root,
@@ -626,10 +651,18 @@ impl Guardian {
         platform: &impl Platform,
         log: &mut RotatingLog,
     ) -> io::Result<usize> {
+        let target = target
+            .map(|target| {
+                crate::attribution::WorkloadHandles::new(
+                    self.frozen.iter().map(|w| w.workload_id.as_str()),
+                )
+                .resolve(target)
+            })
+            .transpose()?;
         let ids: Vec<_> = self
             .frozen
             .iter()
-            .filter(|w| target.is_none_or(|id| w.workload_id == id))
+            .filter(|w| target.as_deref().is_none_or(|id| w.workload_id == id))
             .map(|w| w.workload_id.clone())
             .collect();
         if target.is_some() && ids.is_empty() {
@@ -660,12 +693,29 @@ impl Guardian {
         if forced {
             self.ineligible.insert(id.to_owned(), now + INELIGIBLE);
         }
-        self.explain("resumed", &format!("Resumed {id} ({reason})."));
+        let description =
+            self.descriptions
+                .remove(id)
+                .unwrap_or_else(|| crate::notifications::Work {
+                    label: "workload".into(),
+                    agent: "agent".into(),
+                    handle: String::new(),
+                    bytes: None,
+                    ports: Vec::new(),
+                });
+        self.explain(
+            "resumed",
+            &format!("Resumed {} ({reason}).", description.label),
+        );
         self.decision(log, "resume", serde_json::json!({"mode": self.mode, "level": self.level, "workload": workload, "reason": reason, "evidence": self.evidence}));
         if forced {
             self.notify(
-                "forced_resume",
-                "Resumed a paused workload; it is protected from freezing for five minutes.",
+                if reason == "max_freeze" {
+                    "max_freeze"
+                } else {
+                    "forced_resume"
+                },
+                &crate::notifications::resumed(&description, reason == "max_freeze"),
                 now,
                 platform,
                 log,
@@ -681,10 +731,11 @@ impl Guardian {
         platform: &impl Platform,
         log: &mut RotatingLog,
     ) {
-        if self
-            .notifications
-            .get(kind)
-            .is_some_and(|then| now.saturating_duration_since(*then) < Duration::from_secs(60))
+        if kind != "max_freeze"
+            && self
+                .notifications
+                .get(kind)
+                .is_some_and(|then| now.saturating_duration_since(*then) < Duration::from_secs(60))
         {
             return;
         }

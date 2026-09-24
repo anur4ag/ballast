@@ -5,4 +5,5 @@ pub mod daemon;
 pub mod guardian;
 pub mod hooks;
 pub mod install;
+mod notifications;
 pub mod platform;

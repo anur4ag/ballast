@@ -388,12 +388,23 @@ fn run_with_targets(
                         continue;
                     }
                     let response = match request.method {
-                        ipc::Method::Resume { target } => match guardian.resume(
-                            target.as_deref(),
-                            Instant::now(),
-                            &platform,
-                            &mut decisions,
-                        ) {
+                        ipc::Method::Resume { target } => match (|| {
+                            let target = target
+                                .as_deref()
+                                .map(|target| {
+                                    crate::attribution::WorkloadHandles::for_snapshot(
+                                        &published.read().unwrap(),
+                                    )
+                                    .resolve(target)
+                                })
+                                .transpose()?;
+                            guardian.resume(
+                                target.as_deref(),
+                                Instant::now(),
+                                &platform,
+                                &mut decisions,
+                            )
+                        })() {
                             Ok(count) => {
                                 next_tick = Instant::now();
                                 ipc::Response::new(ipc::Reply::Resumed { count })

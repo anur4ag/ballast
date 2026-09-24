@@ -85,7 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &ballast::daemon::files::Paths::from_env()?,
                 target.as_deref(),
             )?;
-            println!("Resumed {count} frozen entries.");
+            println!(
+                "Resumed {}.",
+                ballast::cli::count(count, "frozen entry", "frozen entries")
+            );
         }
         Command::Gc => ballast::cleanup::command(None)?,
         Command::Stop { target } => ballast::cleanup::command(Some(target))?,

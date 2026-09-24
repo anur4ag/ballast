@@ -57,6 +57,35 @@ fn render(s: &Snapshot, width: u16, height: u16, scroll: &mut u16) -> String {
 }
 
 #[test]
+fn bytes_picks_the_largest_unit_that_keeps_the_value_at_least_one() {
+    for (value, expected) in [
+        (None, "?"),
+        (Some(0), "0 B"),
+        (Some(512), "512 B"),
+        (Some(1024), "1.0 KiB"),
+        (Some(1024 * 512), "512.0 KiB"),
+        (Some(1u64 << 20), "1.0 MiB"),
+        (Some((1u64 << 20) * 512), "512.0 MiB"),
+        (Some(1u64 << 30), "1.0 GiB"),
+        (Some((1u64 << 30) * 2), "2.0 GiB"),
+    ] {
+        assert_eq!(bytes(value), expected, "value: {value:?}");
+    }
+}
+
+#[test]
+fn count_picks_singular_or_plural() {
+    for (n, singular, plural, expected) in [
+        (0, "target", "targets", "0 targets"),
+        (1, "target", "targets", "1 target"),
+        (2, "target", "targets", "2 targets"),
+        (1, "process", "processes", "1 process"),
+    ] {
+        assert_eq!(count(n, singular, plural), expected, "n: {n}");
+    }
+}
+
+#[test]
 fn layouts_wrap_without_losing_reasons_and_scroll_to_every_row() {
     let s = snapshot();
     for width in [20, 40, 63, 80, 120, 160] {
@@ -76,7 +105,9 @@ fn layouts_wrap_without_losing_reasons_and_scroll_to_every_row() {
     for width in [80, 120, 160] {
         let wide = render(&s, width, 36, &mut 0);
         assert!(wide.contains("synthetic build"), "{wide}");
-        assert!(wide.contains("w-build"));
+        // "w-build" is the full workload id; only its short handle is ever shown.
+        assert!(wide.contains("3e325f"));
+        assert!(!wide.contains("w-build"));
         assert!(wide.contains("30s"));
         assert!(wide.contains("15s"));
         assert!(wide.contains("1 owner · 1 agent · 1 workload"));
@@ -314,13 +345,19 @@ fn fleet_tree_columns_and_optional_section_gaps() {
     s.attribution.workloads.push(work);
     for width in [80, 160] {
         let screen = render(&s, width, 40, &mut 0);
-        for text in [
-            "├ codex",
-            "│ ├ synthetic build",
-            "│ └ next",
-            "└ claude",
-            "  └ last",
-        ] {
+        // Below the dedicated wide ID column threshold (110), workload rows
+        // combine the handle into the label column as "[handle] label"; at
+        // or above it, LABEL and ID are separate columns and LABEL is plain.
+        let (build, next, last) = if width >= 110 {
+            ("│ ├ synthetic build", "│ └ next", "  └ last")
+        } else {
+            (
+                "│ ├ [3e325f] synthetic build",
+                "│ └ [4ecb63] next",
+                "  └ [93f06c] last",
+            )
+        };
+        for text in ["├ codex", build, next, "└ claude", last] {
             assert!(screen.contains(text), "{width}: {text}: {screen}");
         }
         assert!(screen.contains("kernel critical · pageout 12.5 MiB/s · swapout 300.0 MiB/s"));
@@ -332,7 +369,7 @@ fn fleet_tree_columns_and_optional_section_gaps() {
                 .unwrap();
             let label = header.find("LABEL").unwrap();
             assert_eq!(header.find("ID"), Some(153));
-            for text in ["▾ Test fleet", "├ codex", "│ ├ synthetic build"] {
+            for text in ["▾ Test fleet", "├ codex", build] {
                 let line = screen.lines().find(|line| line.contains(text)).unwrap();
                 assert_eq!(line.find(text), Some(label));
             }
@@ -360,4 +397,17 @@ fn fleet_tree_columns_and_optional_section_gaps() {
         .find(|line| line.starts_with("q quit"))
         .unwrap();
     assert_eq!(help, "q quit · j/k scroll · PgUp/PgDn");
+}
+
+#[test]
+fn narrow_and_medium_workload_rows_keep_the_handle_intact_even_with_a_long_label() {
+    let mut s = snapshot();
+    // "w-build" hashes to short handle "3e325f"; a long label must never push
+    // it out of a truncated column, since the handle is what `ballast stop`
+    // and `ballast resume` actually accept.
+    s.attribution.workloads[0].label = "a".repeat(200);
+    for width in [40, 64, 80] {
+        let screen = render(&s, width, 40, &mut 0);
+        assert!(screen.contains("[3e325f]"), "{width}: {screen}");
+    }
 }

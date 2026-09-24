@@ -1,12 +1,13 @@
-use crate::attribution::{AgentState, ProcessRole, WorkloadClass};
+use crate::attribution::{AgentState, ProcessRole, WorkloadClass, WorkloadHandles};
 use crate::daemon::{
     Snapshot,
     files::{Mode, RotatingLog},
 };
 use crate::guardian::Guardian;
+use crate::notifications::{self, Work};
 use crate::platform::{Platform, ProcessIdentity, ProcessLiveness, Signal};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,16 @@ struct Termination {
     workload_id: Option<String>,
     automatic: bool,
     members: HashMap<ProcessIdentity, (Option<Instant>, bool)>,
+    memory: HashMap<ProcessIdentity, u64>,
+    description: Work,
+}
+
+#[derive(Default)]
+struct SessionNotice {
+    ended: bool,
+    reclaimed: BTreeMap<String, Work>,
+    services: BTreeMap<String, Work>,
+    notified: bool,
 }
 
 pub struct Cleanup {
@@ -42,7 +53,7 @@ pub struct Cleanup {
     grace: Duration,
     pending: HashMap<String, Termination>,
     reported_services: HashSet<String>,
-    reclaimed: Vec<String>,
+    sessions: HashMap<String, SessionNotice>,
     last_notification: HashMap<&'static str, Instant>,
     errors: Vec<String>,
 }
@@ -53,7 +64,7 @@ impl Cleanup {
             grace,
             pending: HashMap::new(),
             reported_services: HashSet::new(),
-            reclaimed: Vec::new(),
+            sessions: HashMap::new(),
             last_notification: HashMap::new(),
             errors: Vec::new(),
         }
@@ -85,7 +96,7 @@ impl Cleanup {
         platform: &impl Platform,
         log: &mut RotatingLog,
     ) {
-        self.collect(now, snapshot, false, platform, log);
+        self.collect(snapshot, false, log);
         self.advance(now, snapshot, guardian, platform, log);
     }
 
@@ -100,6 +111,11 @@ impl Cleanup {
         let now = Instant::now();
         let mut report = if let Some(target) = target {
             let agent = snapshot.attribution.agents.iter().any(|a| a.id == target);
+            let target = if agent {
+                target.to_owned()
+            } else {
+                WorkloadHandles::for_snapshot(snapshot).resolve(target)?
+            };
             let workloads: Vec<_> = snapshot
                 .attribution
                 .workloads
@@ -109,7 +125,7 @@ impl Cleanup {
             if !agent && workloads.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "agent or workload not found; use ballast ps for IDs",
+                    "agent or workload not found; use ballast ps for handles",
                 ));
             }
             let mut report = Report {
@@ -117,12 +133,18 @@ impl Cleanup {
                 ..Report::default()
             };
             for w in workloads {
-                self.schedule(w.id.clone(), w.agent_id.clone(), Some(w.id.clone()), false);
+                self.schedule(
+                    w.id.clone(),
+                    w.agent_id.clone(),
+                    Some(w.id.clone()),
+                    false,
+                    snapshot,
+                );
                 report.scheduled.push(w.id.clone());
             }
             report
         } else {
-            self.collect(now, snapshot, true, platform, log)
+            self.collect(snapshot, true, log)
         };
         if target.is_none() {
             let unattributed: HashSet<_> = snapshot
@@ -176,7 +198,26 @@ impl Cleanup {
         agent_id: String,
         workload_id: Option<String>,
         automatic: bool,
+        snapshot: &Snapshot,
     ) {
+        let agent = snapshot
+            .attribution
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id);
+        self.sessions.entry(agent_id.clone()).or_default().ended =
+            agent.is_some_and(|a| a.state == AgentState::Ended);
+        let description = workload_id
+            .as_ref()
+            .and_then(|id| snapshot.attribution.workloads.iter().find(|w| &w.id == id))
+            .map(|w| Work::from_snapshot(snapshot, w))
+            .unwrap_or_else(|| Work {
+                label: "background helpers".into(),
+                agent: notifications::agent_name(agent.map_or("agent", |a| a.kind.as_str())),
+                handle: String::new(),
+                bytes: None,
+                ports: Vec::new(),
+            });
         self.pending
             .entry(key)
             .and_modify(|t| t.automatic &= automatic)
@@ -185,21 +226,24 @@ impl Cleanup {
                 workload_id,
                 automatic,
                 members: HashMap::new(),
+                memory: HashMap::new(),
+                description,
             });
     }
 
-    fn collect(
-        &mut self,
-        now: Instant,
-        snapshot: &Snapshot,
-        immediate: bool,
-        platform: &impl Platform,
-        log: &mut RotatingLog,
-    ) -> Report {
+    fn collect(&mut self, snapshot: &Snapshot, immediate: bool, log: &mut RotatingLog) -> Report {
         let mut report = Report {
             observe: matches!(self.mode, Mode::Observe),
             ..Report::default()
         };
+        self.sessions.retain(|id, session| {
+            (!session.notified && !session.reclaimed.is_empty())
+                || snapshot.attribution.agents.iter().any(|a| &a.id == id)
+                || self.pending.values().any(|t| &t.agent_id == id)
+        });
+        for session in self.sessions.values_mut() {
+            session.services.clear();
+        }
         self.reported_services
             .retain(|id| snapshot.attribution.workloads.iter().any(|w| &w.id == id));
         for agent in &snapshot.attribution.agents {
@@ -219,7 +263,13 @@ impl Cleanup {
                 .filter(|w| w.agent_id == agent.id)
             {
                 if w.class == WorkloadClass::Batch {
-                    self.schedule(w.id.clone(), agent.id.clone(), Some(w.id.clone()), true);
+                    self.schedule(
+                        w.id.clone(),
+                        agent.id.clone(),
+                        Some(w.id.clone()),
+                        true,
+                        snapshot,
+                    );
                     report.scheduled.push(w.id.clone());
                 } else {
                     let members: Vec<_> = snapshot
@@ -237,6 +287,11 @@ impl Cleanup {
                         .collect();
                     ports.sort_unstable();
                     ports.dedup();
+                    let session = self.sessions.entry(agent.id.clone()).or_default();
+                    session.ended = true;
+                    session
+                        .services
+                        .insert(w.id.clone(), Work::from_snapshot(snapshot, w));
                     report.services.push(Service {
                         workload_id: w.id.clone(),
                         pids: members.iter().map(|p| p.identity.pid).collect(),
@@ -248,7 +303,7 @@ impl Cleanup {
                 p.agent_id.as_deref() == Some(&agent.id) && p.role == ProcessRole::AgentInternal
             }) {
                 let key = format!("internal:{}", agent.id);
-                self.schedule(key.clone(), agent.id.clone(), None, true);
+                self.schedule(key.clone(), agent.id.clone(), None, true, snapshot);
                 report.scheduled.push(key);
             }
         }
@@ -257,18 +312,12 @@ impl Cleanup {
             .iter()
             .filter(|s| !self.reported_services.contains(&s.workload_id))
             .collect();
-        if !new.is_empty() && self.can_notify("services", now) {
-            let body = new
-                .iter()
-                .map(|s| {
-                    format!(
-                        "Service {} survives (PID {:?}, ports {:?}); ballast stop {}",
-                        s.workload_id, s.pids, s.ports, s.workload_id
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.notify("services", &body, now, platform, log);
+        if !new.is_empty() {
+            self.record(
+                log,
+                "service_reported",
+                serde_json::json!({"count": new.len()}),
+            );
             self.reported_services
                 .extend(new.iter().map(|s| s.workload_id.clone()));
         }
@@ -335,8 +384,23 @@ impl Cleanup {
                     "clean_reclaimed",
                     serde_json::json!({"target": key, "processes": gone}),
                 );
-                self.reclaimed
-                    .push(format!("{} ({} processes)", key, gone.len()));
+                let session = self
+                    .sessions
+                    .entry(termination.agent_id.clone())
+                    .or_default();
+                let work = session.reclaimed.entry(key.clone()).or_insert_with(|| {
+                    let mut work = termination.description.clone();
+                    work.bytes = Some(0);
+                    work
+                });
+                for id in &gone {
+                    work.bytes = work.bytes.and_then(|sum| {
+                        termination
+                            .memory
+                            .remove(id)
+                            .map(|bytes| sum.saturating_add(bytes))
+                    });
+                }
             }
             termination.members.retain(|id, _| {
                 platform.process_liveness(*id) != ProcessLiveness::Gone
@@ -365,6 +429,14 @@ impl Cleanup {
             active.insert(key.clone());
             // Remember intent before thaw/TERM: an unreadable scan must not discard a retry.
             for &id in &members {
+                if let Some(metrics) = snapshot
+                    .processes
+                    .iter()
+                    .find(|p| p.identity == id)
+                    .and_then(|p| p.metrics)
+                {
+                    termination.memory.insert(id, metrics.memory_bytes);
+                }
                 termination.members.entry(id).or_insert((None, false));
             }
             if let Some(id) = &termination.workload_id {
@@ -420,10 +492,59 @@ impl Cleanup {
         }
         pending.retain(|key, _| active.contains(key));
         self.pending = pending;
-        if !self.reclaimed.is_empty() && self.can_notify("reclaimed", now) {
-            let body = format!("Reclaimed {}", self.reclaimed.join(", "));
-            self.notify("reclaimed", &body, now, platform, log);
-            self.reclaimed.clear();
+        self.notify_sessions(now, platform, log);
+    }
+
+    fn notify_sessions(&mut self, now: Instant, platform: &impl Platform, log: &mut RotatingLog) {
+        let mut ready: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(id, session)| {
+                !session.notified
+                    && (!session.reclaimed.is_empty() || !session.services.is_empty())
+                    && (matches!(self.mode, Mode::Observe)
+                        || !self.pending.values().any(|t| &t.agent_id == *id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ready.sort_unstable();
+        for id in ready {
+            let session = &self.sessions[&id];
+            let reclaimed = !session.reclaimed.is_empty();
+            let services = !session.services.is_empty();
+            if (reclaimed && !self.can_notify("reclaimed", now))
+                || (services && !self.can_notify("services", now))
+            {
+                continue;
+            }
+            let work = session
+                .reclaimed
+                .values()
+                .chain(session.services.values())
+                .next()
+                .unwrap();
+            let body = notifications::cleanup(
+                &work.agent,
+                session.ended,
+                &session.reclaimed.values().cloned().collect::<Vec<_>>(),
+                &session.services.values().cloned().collect::<Vec<_>>(),
+            );
+            let ended = session.ended;
+            self.notify(
+                if reclaimed { "reclaimed" } else { "services" },
+                &body,
+                now,
+                platform,
+                log,
+            );
+            if services {
+                self.last_notification.insert("services", now);
+            }
+            if ended {
+                self.sessions.get_mut(&id).unwrap().notified = true;
+            } else {
+                self.sessions.remove(&id);
+            }
         }
     }
 
@@ -515,6 +636,12 @@ pub fn command(target: Option<String>) -> io::Result<()> {
         ipc::{Client, Method, Reply},
     };
     let mut client = Client::connect(&Paths::from_env()?, Duration::from_secs(3))?;
+    let snapshot = match client.request(Method::Snapshot)?.reply {
+        Reply::Snapshot { snapshot } => snapshot,
+        Reply::Error { message } => return Err(io::Error::other(message)),
+        _ => return Err(io::Error::other("unexpected snapshot response")),
+    };
+    let handles = WorkloadHandles::for_snapshot(&snapshot);
     let response = client.request(target.map_or(Method::Gc, |target| Method::Stop { target }))?;
     let report = match response.reply {
         Reply::Cleanup { report } => report,
@@ -522,21 +649,31 @@ pub fn command(target: Option<String>) -> io::Result<()> {
         _ => return Err(io::Error::other("unexpected cleanup response")),
     };
     println!(
-        "{} {} targets; survivors receive SIGKILL after 5 seconds.",
+        "{} {}; survivors receive SIGKILL after 5 seconds.",
         if report.observe {
             "Would stop"
         } else {
             "Stopping"
         },
-        report.scheduled.len()
+        crate::cli::count(report.scheduled.len(), "target", "targets")
     );
     for target in report.pending {
-        println!("Cleanup pending: {target}");
+        println!(
+            "Cleanup pending: {}",
+            if target.starts_with("internal:") {
+                "agent helpers"
+            } else {
+                handles.get(&target)
+            }
+        );
     }
     for service in report.services {
         println!(
             "Service {}: PID {:?}, ports {:?}; ballast stop {}",
-            service.workload_id, service.pids, service.ports, service.workload_id
+            handles.get(&service.workload_id),
+            service.pids,
+            service.ports,
+            handles.get(&service.workload_id)
         );
     }
     for orphan in report.orphans {

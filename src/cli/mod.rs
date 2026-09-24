@@ -54,12 +54,12 @@ pub fn status(json: bool) -> io::Result<()> {
             println!("{line}");
         }
         println!(
-            "tick {}: {:.3} ms CPU, {:.3} ms wall, {} ms interval; {} processes",
+            "tick {}: {:.3} ms CPU, {:.3} ms wall, {} ms interval; {}",
             snapshot.status.tick,
             snapshot.status.tick_cpu_ns as f64 / 1e6,
             snapshot.status.tick_wall_ns as f64 / 1e6,
             snapshot.status.tick_interval_ms,
-            snapshot.status.process_count
+            count(snapshot.status.process_count, "process", "processes")
         );
     } else {
         return Err(io::Error::other("unexpected daemon snapshot response"));
@@ -75,7 +75,11 @@ fn summary(snapshot: &Snapshot) -> Vec<String> {
         status.mode,
         snapshot.frozen.len(),
         if matches!(status.mode, crate::daemon::files::Mode::Observe) {
-            "simulated freezes"
+            if snapshot.frozen.len() == 1 {
+                "simulated freeze"
+            } else {
+                "simulated freezes"
+            }
         } else {
             "frozen"
         },
@@ -132,10 +136,21 @@ fn summary(snapshot: &Snapshot) -> Vec<String> {
         ));
     }
     if !status.cleanup_pending.is_empty() {
-        lines.push(format!(
-            "Cleanup pending: {}",
-            clean(&status.cleanup_pending.join(", "))
-        ));
+        lines.push(format!("Cleanup pending: {}", {
+            let handles = crate::attribution::WorkloadHandles::for_snapshot(snapshot);
+            status
+                .cleanup_pending
+                .iter()
+                .map(|id| {
+                    if id.starts_with("internal:") {
+                        "agent helpers"
+                    } else {
+                        handles.get(id)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }));
     }
     if let Some(error) = &status.last_error {
         lines.push(format!("Last error: {}", clean(error)));
@@ -143,14 +158,18 @@ fn summary(snapshot: &Snapshot) -> Vec<String> {
     lines
 }
 
-fn bytes(value: Option<u64>) -> String {
+pub(crate) fn bytes(value: Option<u64>) -> String {
     let Some(value) = value else {
         return "?".into();
     };
     if value >= 1 << 30 {
         format!("{:.1} GiB", value as f64 / (1u64 << 30) as f64)
-    } else {
+    } else if value >= 1 << 20 {
         format!("{:.1} MiB", value as f64 / (1u64 << 20) as f64)
+    } else if value >= 1 << 10 {
+        format!("{:.1} KiB", value as f64 / (1u64 << 10) as f64)
+    } else {
+        format!("{value} B")
     }
 }
 fn number(value: Option<f64>) -> String {
@@ -168,7 +187,7 @@ fn age(now: u64, since: u64) -> String {
     }
 }
 // Process labels are untrusted terminal text, including ANSI escapes and bidi controls.
-fn clean(value: &str) -> String {
+pub(crate) fn clean(value: &str) -> String {
     value
         .chars()
         .map(|c| {
@@ -179,4 +198,8 @@ fn clean(value: &str) -> String {
             }
         })
         .collect()
+}
+
+pub fn count(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
 }

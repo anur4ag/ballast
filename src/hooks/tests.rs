@@ -1133,7 +1133,7 @@ fn kill_protection_literal_commands_and_fail_open_boundaries() {
     );
     let reason = super::protection::deny(&request, &snapshot, &test_evidence(&snapshot)).unwrap();
     assert!(
-        reason.contains("2 processes belonging to 1 other agents"),
+        reason.contains("2 processes belonging to 1 other agent."),
         "{reason}"
     );
     assert!(

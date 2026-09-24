@@ -99,9 +99,9 @@ pub(super) fn deny(
         )
     };
     Some(format!(
-        "Ballast blocked this: the command would also terminate {} processes belonging to {} other agents. {own}",
-        other.len(),
-        owners.len()
+        "Ballast blocked this: the command would also terminate {} belonging to {}. {own}",
+        crate::cli::count(other.len(), "process", "processes"),
+        crate::cli::count(owners.len(), "other agent", "other agents")
     ))
 }
 

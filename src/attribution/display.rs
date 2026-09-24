@@ -6,6 +6,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let view = &snapshot.attribution;
+    let handles = super::WorkloadHandles::for_snapshot(snapshot);
     for owner in &view.owners {
         writeln!(
             out,
@@ -28,7 +29,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
                 .map(|r| r.pid.to_string())
                 .unwrap_or_else(|| "-".into()),
             agent.state,
-            agent.memory.bytes,
+            crate::cli::bytes(Some(agent.memory.bytes)),
             if agent.memory.complete {
                 ""
             } else {
@@ -42,10 +43,10 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
         writeln!(
             out,
             "WORKLOAD {} agent={} class={:?} memory={}{} frozen={} label={}",
-            workload.id.escape_default(),
+            handles.get(&workload.id),
             workload.agent_id.escape_default(),
             workload.class,
-            workload.memory.bytes,
+            crate::cli::bytes(Some(workload.memory.bytes)),
             if workload.memory.complete {
                 ""
             } else {
@@ -71,10 +72,10 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
             a.and_then(|a| a.agent_id.as_deref())
                 .unwrap_or("-")
                 .escape_default(),
-            a.and_then(|a| a.workload_id.as_deref()).unwrap_or("-").escape_default(),
+            a.and_then(|a| a.workload_id.as_deref()).map(|id| handles.get(id)).unwrap_or("-"),
             a.map_or(ProcessRole::Unattributed, |a| a.role),
             p.metrics
-                .map(|m| m.memory_bytes.to_string())
+                .map(|m| crate::cli::bytes(Some(m.memory_bytes)))
                 .unwrap_or_else(|| "?".into()),
             p.metrics.map(|m| m.cpu_time_ns.to_string()).unwrap_or_else(|| "?".into()),
             p.exe.as_deref().unwrap_or("?").escape_default()
@@ -85,7 +86,7 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
         writeln!(
             out,
             "FROZEN {} since_ms={} duration_ms={} mode={:?} reason=guardian_memory_pressure",
-            frozen.workload_id.escape_default(),
+            handles.get(&frozen.workload_id),
             frozen.frozen_at_ms,
             snapshot
                 .status
@@ -118,7 +119,16 @@ pub fn format_ps(snapshot: &crate::daemon::Snapshot) -> String {
         .unwrap();
     }
     for id in &snapshot.status.cleanup_pending {
-        writeln!(out, "CLEANUP_PENDING {}", id.escape_default()).unwrap();
+        writeln!(
+            out,
+            "CLEANUP_PENDING {}",
+            if id.starts_with("internal:") {
+                "agent helpers"
+            } else {
+                handles.get(id)
+            }
+        )
+        .unwrap();
     }
     out
 }

@@ -800,7 +800,7 @@ fn critical_freeze_proceeds_when_agents_hold_at_least_thirty_percent() {
 }
 
 #[test]
-fn one_freeze_per_five_second_cooldown() {
+fn one_freeze_per_five_second_cooldown_and_only_the_first_notifies() {
     let home = TestHome::new("cooldown");
     let mut guardian = Guardian::new(
         home.0.clone(),
@@ -813,6 +813,10 @@ fn one_freeze_per_five_second_cooldown() {
     let mut log = home.log();
     let (mut now, mut step) =
         warm_to_critical(&mut guardian, &mut platform, &mut attributor, &mut log);
+    // warm_to_critical's last tick reads Critical against an empty (agent-less)
+    // snapshot, which itself stands down with a "non_agent_pressure" notification;
+    // count from here rather than asserting an absolute total.
+    let warmup_notifications = platform.notifications().len();
 
     let agent_root = id(300, 1);
     let first = id(301, 1);
@@ -864,6 +868,19 @@ fn one_freeze_per_five_second_cooldown() {
         "the fastest-tiebroken workload freezes first"
     );
     let first_frozen = guardian.frozen[0].workload_id.clone();
+    assert_eq!(
+        platform.notifications().len() - warmup_notifications,
+        1,
+        "the first freeze of the episode notifies"
+    );
+    assert!(
+        platform
+            .notifications()
+            .last()
+            .unwrap()
+            .1
+            .contains("Paused")
+    );
 
     // Well within the 5s cooldown: the still-eligible other workload must not also freeze.
     now += Duration::from_secs(1);
@@ -899,6 +916,11 @@ fn one_freeze_per_five_second_cooldown() {
             .frozen
             .iter()
             .any(|w| w.workload_id != first_frozen)
+    );
+    assert_eq!(
+        platform.notifications().len() - warmup_notifications,
+        1,
+        "a second freeze in the same still-critical episode stays silent"
     );
 }
 
@@ -1509,6 +1531,61 @@ fn manual_resume_marks_the_workload_ineligible_for_five_minutes() {
         1,
         "past 5 minutes the workload is eligible again"
     );
+}
+
+#[test]
+fn resume_accepts_a_short_workload_handle() {
+    let home = TestHome::new("resume-short-handle");
+    let mut guardian = Guardian::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Enforce,
+        Thresholds::default(),
+    );
+    let mut platform = FakePlatform::new("boot-1");
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = home.log();
+    let (mut now, mut step) =
+        warm_to_critical(&mut guardian, &mut platform, &mut attributor, &mut log);
+
+    let agent_root = id(1150, 1);
+    let work_root = id(1151, 1);
+    let mut attribution = AttributionSnapshot::default();
+    attribution.agents.push(agent("a:hh", agent_root, 6 * GIB));
+    attribution.workloads.push(workload(
+        "w:20",
+        "a:hh",
+        work_root,
+        WorkloadClass::Batch,
+        0,
+        GIB,
+        Some(1000),
+    ));
+    attribution
+        .processes
+        .push(workload_attribution(work_root, "a:hh", "w:20"));
+    let processes = vec![process(work_root, agent_root.pid, GIB)];
+
+    now += Duration::from_secs(1);
+    step += 1;
+    let snap = snapshot(Some(heavy_swap(step)), attribution, processes);
+    guardian
+        .tick(now, &snap, &mut platform, &mut attributor, &mut log)
+        .expect("freeze tick");
+    assert_eq!(guardian.frozen[0].workload_id, "w:20");
+
+    // "5b8379" is the six-hex SHA256 prefix of "w:20" (verified offline), not
+    // the full workload id -- exactly what `ballast resume <handle>` sends.
+    guardian
+        .resume(
+            Some("5b8379"),
+            now + Duration::from_secs(1),
+            &platform,
+            &mut log,
+        )
+        .expect("resume by short handle");
+    assert!(guardian.frozen.is_empty());
+    assert_eq!(platform.continued(), vec![work_root]);
 }
 
 // ---------------------------------------------------------------------
@@ -2149,6 +2226,32 @@ fn notifications_are_limited_per_kind_to_one_per_minute() {
         &mut log,
     );
     assert_eq!(platform.notifications().len(), 3);
+}
+
+#[test]
+fn max_freeze_notifications_ignore_the_per_minute_limit() {
+    let home = TestHome::new("max-freeze-rate-limit");
+    let mut guardian = Guardian::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Enforce,
+        Thresholds::default(),
+    );
+    let platform = FakePlatform::new("boot-1");
+    let mut log = home.log();
+    let now = Instant::now();
+    // Two max_freeze notifications one second apart: every other kind would be
+    // collapsed to one per minute, but a forced ten-minute resume always notifies.
+    for seconds in [0, 1] {
+        guardian.notify(
+            "max_freeze",
+            "resumed after 10 min",
+            now + Duration::from_secs(seconds),
+            &platform,
+            &mut log,
+        );
+    }
+    assert_eq!(platform.notifications().len(), 2);
 }
 
 #[path = "review_tests.rs"]
