@@ -35,8 +35,16 @@ enum Command {
         all: bool,
     },
     Install,
-    Uninstall,
-    Doctor,
+    Uninstall {
+        /// Remove retained Ballast configuration, state and logs.
+        #[arg(long)]
+        purge: bool,
+    },
+    Doctor {
+        /// Submit a test desktop notification.
+        #[arg(long)]
+        notify: bool,
+    },
     Debug {
         #[command(subcommand)]
         command: DebugCommand,
@@ -59,6 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ballast::daemon::warn_if_stranded();
     }
     match command {
+        Command::Install => ballast::install::Installation::from_env()?.install()?,
+        Command::Uninstall { purge } => {
+            ballast::install::Installation::from_env()?.uninstall(purge)?
+        }
+        Command::Doctor { notify } => {
+            if !ballast::install::Installation::from_env()?.doctor(notify) {
+                std::process::exit(1);
+            }
+        }
         Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
         Command::Resume { target, .. } => {
             let count = ballast::daemon::resume_command(

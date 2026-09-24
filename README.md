@@ -34,6 +34,17 @@ Building on macOS requires the Xcode Command Line Tools for the small socket-inf
 Runtime dependencies are the system APIs; notifications use `osascript` on macOS and `notify-send` when available on Linux.
 Successful invocation does not guarantee notification delivery by the desktop session.
 
+Install the built binary from its permanent location with `ballast install`.
+This starts a user service and adds Claude Code and Codex hooks while preserving existing hooks and making timestamped backups.
+Open Codex and use `/hooks` to approve the Ballast hooks; repeat approval after moving the binary or changing the hook definition.
+`ballast doctor` checks installation, hook trust, recovery state and platform access; `ballast doctor --notify` submits a test desktop notification.
+`ballast uninstall` resumes frozen work and removes the service and Ballast hooks; `--purge` also removes Ballast's configuration, state and logs.
+Rerun `ballast install` after upgrading or moving the binary.
+For isolated installs, paths respect `HOME`, `BALLAST_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME` (Linux), `BALLAST_SERVICE_DIR` and `BALLAST_SERVICE_LABEL`.
+Use an absolute path for each directory override and a unique service label for tests.
+Linux requires a working systemd user session; headless systems without a notification service report that limitation in doctor.
+Doctor reads user-level Codex trust; project or managed settings can still override runtime hook behavior.
+
 Run `cargo run -- daemon` in the foreground as your normal user, then `cargo run -- status` or `cargo run -- status --json` in another terminal.
 `BALLAST_HOME=/tmp/ballast-demo` overrides `~/.ballast` for both commands.
 A second daemon using the same directory refuses to start.
@@ -62,7 +73,7 @@ For example, `{"version":1,"method":"status"}` returns `{"version":1,"type":"sta
 `snapshot`, `ps`, and `top` return `type: "snapshot"` with a `snapshot` containing status, capabilities, boot identity, processes, process changes, and raw pressure inputs.
 `resume` (optional `target`), `stop` (`target`), `gc`, and `hook` (`payload`) are routed to the tick loop.
 Cleanup requests return `type: "cleanup"` with a `report` containing `observe`, `scheduled` and `pending` target IDs, `services` (workload ID, PIDs, ports), and `orphans` (identity and executable basename).
-The hook bridge is a placeholder.
+`ballast hook claude|codex` bridges agent hooks to the daemon and fails open when unavailable.
 Errors use `{"version":1,"type":"error","message":"..."}`.
 A connection supports multiple requests; malformed JSON and unsupported versions return errors, while incomplete or oversized lines close the connection.
 Requests are capped at 64 KiB and the server admits up to 64 simultaneous clients.

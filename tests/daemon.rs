@@ -762,3 +762,18 @@ fn daemon_benchmark_at_about_1000_processes() {
         rss_kb as f64 / 1024.0
     );
 }
+
+#[test]
+fn socket_bind_startup_failure_is_written_to_daemon_log() {
+    let home = TempHome::new("bind-log");
+    let long_base = home.path.join("x".repeat(110));
+    let output = Command::new(env!("CARGO_BIN_EXE_ballast"))
+        .arg("daemon")
+        .env("BALLAST_HOME", &long_base)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let log = std::fs::read_to_string(long_base.join("log/daemon.log")).unwrap();
+    assert!(log.contains("daemon startup failed:"), "{log}");
+    assert!(log.contains("path"), "{log}");
+}

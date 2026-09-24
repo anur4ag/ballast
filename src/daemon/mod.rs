@@ -143,18 +143,24 @@ fn run_with_targets(
     paths.prepare()?;
     let loaded_config = Config::load(&paths);
     let config = loaded_config.as_ref().cloned().unwrap_or_default();
-    let server = ipc::Server::bind(paths.clone())?;
     let mut log = RotatingLog::open(paths.base.join("log/daemon.log"), &config)?;
-    let mut decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
-    log.write_line(&format!(
-        "{} daemon {} starting",
-        unix_ms(),
-        env!("CARGO_PKG_VERSION")
-    ))?;
-    let mut platform = NativePlatform::new()?;
-    let boot_id = platform.boot_id()?;
-    recovery::recover(&paths, &mut platform, &config.markers, &mut decisions)?;
-    loaded_config?;
+    let (server, mut decisions, mut platform, boot_id) = (|| {
+        let server = ipc::Server::bind(paths.clone())?;
+        let mut decisions = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
+        log.write_line(&format!(
+            "{} daemon {} starting",
+            unix_ms(),
+            env!("CARGO_PKG_VERSION")
+        ))?;
+        let mut platform = NativePlatform::new()?;
+        let boot_id = platform.boot_id()?;
+        recovery::recover(&paths, &mut platform, &config.markers, &mut decisions)?;
+        loaded_config?;
+        Ok((server, decisions, platform, boot_id))
+    })()
+    .inspect_err(|error: &io::Error| {
+        let _ = log.write_line(&format!("{} daemon startup failed: {error}", unix_ms()));
+    })?;
     let mut guardian = Guardian::new(
         paths.clone(),
         boot_id.clone(),
