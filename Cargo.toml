@@ -1,8 +1,12 @@
 [package]
 name = "ballast"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anur4ag/ballast"
+homepage = "https://github.com/anur4ag/ballast"
+readme = "README.md"
 description = "Keep your machine responsive while coding agents work"
 
 [dependencies]

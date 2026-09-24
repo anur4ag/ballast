@@ -1,0 +1,133 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+      - name: Set release version
+        run: python3 scripts/release/build.py prepare "$GITHUB_REF_NAME"
+      - run: cargo build --release --locked --target '${{ matrix.target }}'
+      - name: Package archive and native deb
+        run: python3 scripts/release/build.py package "$GITHUB_REF_NAME" '${{ matrix.target }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GNUPGHOME: ${{ runner.temp }}/ballast-gnupg
+      APT_SIGNING_FINGERPRINT: ${{ vars.APT_SIGNING_FINGERPRINT }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: sudo apt-get update && sudo apt-get install -y apt-utils
+      - name: Restore previous APT packages
+        shell: bash
+        run: |
+          previous=$(gh release list --exclude-drafts --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("v0.0.0-test.") | not)][0].tagName // empty')
+          if [ -n "$previous" ]; then
+            gh release download "$previous" --pattern apt-repository.tar.gz --dir previous
+          fi
+      - name: Import release signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          install -d -m 700 "$GNUPGHOME"
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+      - name: Generate signed repository, formula and checksums
+        run: python3 scripts/release/publish.py "$GITHUB_REF_NAME"
+      - name: Create draft release and upload assets
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --draft "${prerelease[@]}" --title "Ballast ${GITHUB_REF_NAME#v}" --generate-notes
+      - name: Update private or public Homebrew tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          key="$RUNNER_TEMP/ballast-tap-key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/ballast-known-hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/ballast-known-hosts"
+          git clone git@github.com:anur4ag/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp dist/ballast.rb tap/Formula/ballast.rb
+          cd tap
+          git config user.name 'Ballast releases'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/ballast.rb
+          git commit -m "Release Ballast ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:main
+      - name: Publish release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-apt-repository
+          path: site
+          include-hidden-files: true
+      - name: Remove private signing key
+        if: always()
+        run: |
+          gpgconf --kill all || true
+          rm -rf "$GNUPGHOME"
+  pages:
+    needs: publish
+    # A test tag never exposes packages publicly; publication also needs an explicit repo switch.
+    if: ${{ !contains(github.ref_name, '-test.') && vars.PUBLISH_PACKAGES == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-apt-repository
+          path: site
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: site
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        id: deployment
