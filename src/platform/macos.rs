@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_void};
 use std::mem::{size_of, size_of_val};
 use std::process::Command;
+use std::sync::OnceLock;
 
 unsafe extern "C" {
     fn ballast_listening_port(pid: i32, fd: i32) -> i32;
@@ -95,9 +96,23 @@ impl NativePlatform {
                 (&mut usage as *mut libc::rusage_info_v2).cast(),
             )
         };
-        (result == 0).then_some(ProcessMetrics {
+        if result != 0 {
+            return None;
+        }
+        static TIMEBASE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+        #[allow(deprecated)] // libc is already our Mach binding for host statistics below.
+        let &(numer, denom) = TIMEBASE
+            .get_or_init(|| {
+                let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+                (unsafe { libc::mach_timebase_info(&mut info) } == 0 && info.denom != 0)
+                    .then_some((info.numer, info.denom))
+            })
+            .as_ref()?;
+        let ticks = u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time);
+        Some(ProcessMetrics {
             memory_bytes: usage.ri_phys_footprint,
-            cpu_time_ns: usage.ri_user_time.saturating_add(usage.ri_system_time),
+            cpu_time_ns: (ticks * u128::from(numer) / u128::from(denom)).min(u128::from(u64::MAX))
+                as u64,
         })
     }
 }
@@ -459,13 +474,15 @@ fn parse_args(bytes: &[u8], environment: bool) -> Option<(Vec<String>, Option<En
         return Some((argv, None));
     }
     // SIP may omit the entire environment while still returning complete argv.
-    // An empty string terminates the environment before Apple's auxiliary data.
+    // XNU aligns argv+env and then auxiliary strings separately. Either padding
+    // can be empty, so a complete buffer need not contain an empty-string terminator.
     let env_end = if rest.first() == Some(&0) {
         Some(0)
     } else {
         rest.windows(2)
             .position(|pair| pair == [0, 0])
             .map(|end| end + 1)
+            .or_else(|| (rest.last() == Some(&0)).then_some(rest.len()))
     };
     let env = env_end.and_then(|end| parse_environment(&rest[..end]));
     Some((argv, env))
@@ -618,6 +635,33 @@ mod tests {
              was previously unreadable, not left permanently None"
         );
     }
+    // ticket 16: a real captured KERN_PROCARGS2 buffer whose env section ends on a single NUL,
+    // not the double-NUL the old parser required. No envc/boundary exists between env and
+    // Apple's auxiliary strings, so those are kept rather than guess-filtered; only argv and the
+    // real marker are asserted.
+    #[test]
+    fn captured_single_nul_terminated_env_buffer_yields_its_marker() {
+        let bytes: &[u8] = include_bytes!("../../tests/fixtures/macos-procargs-single-nul.bin");
+        let (argv, env) = parse_args(bytes, true).expect("well-formed procargs2 buffer");
+        assert_eq!(
+            argv,
+            vec![
+                "target/debug/deps/guardian_recovery-7de3806bc2da52b9".to_string(),
+                "idle_fixture".to_string(),
+                "--exact".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ]
+        );
+        let env = env
+            .expect("a single-NUL-terminated env section (no trailing double-NUL) is still known");
+        assert_eq!(
+            env.get("BALLAST_RECOVERY_5a98_70").map(String::as_str),
+            Some("guardian-recovery-test"),
+            "got {env:?}"
+        );
+    }
+
     #[test]
     fn on_demand_arguments_ignore_cache_and_validate_identity() {
         let mut platform = NativePlatform::new().unwrap();

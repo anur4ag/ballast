@@ -35,6 +35,9 @@ pub struct MemorySummary {
     pub complete: bool,
     /// None while warming up or after a gap/unknown memory sample.
     pub growth_30s_bytes: Option<i64>,
+    /// Signed bytes/second over 2 to 30 seconds of consecutive valid samples.
+    #[serde(default)]
+    pub growth_bytes_per_sec: Option<i64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Agent {

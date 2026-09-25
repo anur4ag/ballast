@@ -66,7 +66,11 @@ impl TempHome {
 }
 impl Drop for TempHome {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        if std::thread::panicking() {
+            eprintln!("retained recovery diagnostics: {}", self.path.display());
+        } else {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -121,6 +125,20 @@ fn wait_until(pid: i32, description: &str, want: impl Fn(Option<char>) -> bool) 
         let state = process_state(pid);
         if want(state) {
             return;
+        }
+        if Instant::now() >= deadline {
+            let mut platform = NativePlatform::new().unwrap();
+            if let Some(process) = platform
+                .list_processes(&Default::default(), &Default::default())
+                .unwrap()
+                .into_iter()
+                .find(|p| p.identity.pid == pid)
+            {
+                eprintln!(
+                    "failed owned process: {process:?}; environment: {:?}",
+                    platform.read_environment(process.identity)
+                );
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -227,7 +245,13 @@ impl DaemonGuard {
             .env("BALLAST_HOME", home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(home.join("daemon-stderr.log"))
+                    .expect("open daemon stderr log"),
+            )
             .spawn()
             .expect("spawn ballast daemon");
         let guard = DaemonGuard {
@@ -329,6 +353,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
     );
     daemon.kill();
     let daemon = DaemonGuard::start(&home.path);
+    eprintln!("recovery phase: valid; owned pid {}", valid.pid());
     wait_resumed(valid.pid());
     assert!(
         home.read_frozen_json()["workloads"]
@@ -344,6 +369,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
     fs::write(home.frozen_json_path(), b"{ this is not valid json").expect("corrupt frozen.json");
     daemon.kill();
     let daemon = DaemonGuard::start(&home.path);
+    eprintln!("recovery phase: corrupt; owned pid {}", corrupt.pid());
     wait_resumed(corrupt.pid());
     assert!(
         home.read_frozen_json()["workloads"]
@@ -360,6 +386,7 @@ fn daemon_restart_recovers_a_valid_then_corrupt_then_missing_journal_in_sequence
     }
     daemon.kill();
     let daemon = DaemonGuard::start(&home.path);
+    eprintln!("recovery phase: missing; owned pid {}", missing.pid());
     wait_resumed(missing.pid());
     assert!(
         home.read_frozen_json()["workloads"]

@@ -374,11 +374,21 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
                 }
             ));
         }
-        if p.psi_some_avg10.is_some() || p.psi_full_avg10.is_some() {
+        let some = s
+            .guardian
+            .as_ref()
+            .and_then(|n| n.psi_some_percent)
+            .or(p.psi_some_avg10);
+        let full = s
+            .guardian
+            .as_ref()
+            .and_then(|n| n.psi_full_percent)
+            .or(p.psi_full_avg10);
+        if some.is_some() || full.is_some() {
             inputs.push(format!(
                 "PSI some {}% / full {}%",
-                number(p.psi_some_avg10),
-                number(p.psi_full_avg10)
+                number(some),
+                number(full)
             ));
         }
         if p.kernel_pressure_level.is_some() {
