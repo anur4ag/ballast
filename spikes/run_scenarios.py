@@ -248,8 +248,9 @@ def run_one(args, scenario, enforced, hardware):
                 stop=str(temp/'STOP'), controls=str(temp/'controls.jsonl'), events=str(output/'events.jsonl'), probe=str(output/'probe.jsonl'),
                 port=str(temp/'port'), session=uuid.uuid4().hex, scenario=scenario, dry=not args.pressure, recovery_cycle=args.recovery_cycle,
                 hooks=sys.platform=='linux', latency=args.latency, enforced=enforced, cpu_hold_memory=args.latency and scenario==3 and sys.platform=='linux', cores=min(os.cpu_count() or 1, 10) if args.pressure else 2,
-                memory_mib=(min(7168, int(hardware['total_memory_bytes']/MIB*.96)) if args.pressure else 32),
-                write_mib=8192 if args.pressure else 16, file_mib=128 if args.pressure else 8)
+                memory_mib=(min(10240 if args.mac_memory_rerun else 7168, int(hardware['total_memory_bytes']/MIB*.96)) if args.pressure else 32),
+                write_mib=8192 if args.pressure else 16, file_mib=128 if args.pressure else 8,
+                swap_growth_mib=2048 if args.mac_memory_rerun else 384)
     plan.update(caller_session=uuid.uuid4().hex, agent_pid_file=str(temp/'agent.pid'), latency_dir=str(output/'hooks'),
                 audit_library=str(ROOT/('target/hook_response_audit.dylib' if sys.platform=='darwin' else 'target/hook_response_audit.so')))
     if args.memory_mib is not None:
@@ -332,8 +333,8 @@ def run_one(args, scenario, enforced, hardware):
                 latest = observations[-1]
             if latest:
                 swap = latest['inputs'].get('swap_used_bytes') or 0
-                if swap - (initial_pressure.get('swap_used_bytes') or 0) > 384*MIB:
-                    emergency = 'swap growth >384 MiB'
+                if swap - (initial_pressure.get('swap_used_bytes') or 0) > plan['swap_growth_mib']*MIB:
+                    emergency = f"swap growth >{plan['swap_growth_mib']} MiB"
             if len(samples) >= 2 and all(s['scheduling_ms'] > 1000 for s in samples):
                 emergency = 'two scheduling samples >1000 ms'
             if any(c.poll() is not None for c in (monitor, foreground, root)) or (daemon is not None and daemon.poll() is not None):
@@ -447,6 +448,7 @@ def settle():
             elapsed, old = previous
             rate = max(0, current['swapouts']-old['swapouts'])*current['page_size']/MIB/(now-elapsed)
             normal &= rate<32
+            normal &= (current.get('swap_used_bytes') or 0) <= (old.get('swap_used_bytes') or 0)
         quiet = quiet+1 if normal else 0
         if quiet>=3:
             return
@@ -460,9 +462,11 @@ def main():
     parser.add_argument('--recovery-cycle', action='store_true', help='scenario 1 enforce only: wait for natural recovery and fixed allocation tasks')
     parser.add_argument('--scenario', type=int, choices=range(1,9))
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--mode', choices=('baseline', 'enforced', 'both'), default='both')
     parser.add_argument('--memory-mib', type=int, help='lower the host-scaled memory cap')
     parser.add_argument('--pressure', action='store_true')
     parser.add_argument('--mac-approved', action='store_true')
+    parser.add_argument('--mac-memory-rerun', action='store_true', help='separately approved Mac memory-only run: 10 GiB cap and 2 GiB swap-growth stop')
     parser.add_argument('--stop-file', type=Path)
     parser.add_argument('--worker')
     parser.add_argument('--index', type=int, default=0)
@@ -488,6 +492,8 @@ def main():
             probe(plan)
         return
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    if args.mac_memory_rerun and (sys.platform != 'darwin' or not args.pressure or not args.mac_approved or args.scenario not in (1, 2, 8)):
+        parser.error('--mac-memory-rerun requires approved Mac pressure and --scenario 1, 2 or 8')
     if args.pressure:
         if sys.platform == 'darwin' and not args.mac_approved:
             parser.error('macOS pressure requires explicit user approval, then --mac-approved')
@@ -510,7 +516,7 @@ def main():
         with binary.open('rb') as f:
             args.builds[binary.name] = hashlib.file_digest(f, 'sha256').hexdigest()
     args.builds['runner'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    cap = min(7168, int(hardware['total_memory_bytes']/MIB*.96)) if args.pressure else 32
+    cap = min(10240 if args.mac_memory_rerun else 7168, int(hardware['total_memory_bytes']/MIB*.96)) if args.pressure else 32
     if args.memory_mib is not None and not 1 <= args.memory_mib <= cap:
         parser.error('--memory-mib exceeds the host-scaled hard cap')
     results = []
@@ -520,8 +526,8 @@ def main():
             library = ROOT/('target/hook_response_audit.dylib' if sys.platform=='darwin' else 'target/hook_response_audit.so')
             flags = ['-dynamiclib'] if sys.platform=='darwin' else ['-shared','-fPIC','-ldl']
             subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',*flags,str(ROOT/'examples/hook_response_audit.c'),'-o',str(library)],check=True)
-        for load in ([1,3] if args.latency else [scenario]):
-            for enforced in ([True] if args.recovery_cycle else (False, True)):
+        for load in ([1] if args.mac_memory_rerun and args.latency else [1,3] if args.latency else [scenario]):
+            for enforced in ([True] if args.recovery_cycle else [args.mode=='enforced'] if args.mode!='both' else (False, True)):
                 if args.pressure:
                     settle()
                 results.append(run_one(args, load, enforced, hardware))

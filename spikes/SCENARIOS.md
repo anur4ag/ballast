@@ -9,6 +9,7 @@ python3 spikes/run_scenarios.py --output /tmp/ballast-wiring
 
 Use a fresh output directory.
 `--scenario 1` selects one pair.
+`--mode baseline` or `--mode enforced` selects one half of that pair, including an explicitly authorized continuation after inspecting an emergency-aborted run.
 Tiny mode uses 32 MiB total allocation, at most two CPU workers, 16 MiB of writes and three seconds of active work per run.
 It verifies wiring and cleanup, not pressure protection.
 
@@ -21,7 +22,7 @@ python3 spikes/run_scenarios.py --pressure --output /tmp/ballast-pressure --stop
 The intended VM has four CPUs, 4 GiB RAM and 512 MiB swap.
 Do not run pressure loads on a shared Linux host.
 macOS pressure requires the user's prior approval and the additional `--mac-approved` flag.
-The approved Mac measurements for this ticket must also pass `--memory-mib 2048`.
+The initial approved Mac measurements used `--memory-mib 2048`.
 `--memory-mib N` can lower the automatic memory cap for an approved run.
 
 | Bound | Pressure mode |
@@ -38,7 +39,7 @@ Normal cleanup first resumes stopped workers, lets agent roots reap their childr
 The watchdog repeats identity-checked cleanup if the runner dies.
 Control processes and workload processes have separate registries so the macOS Guardian cannot select the probe or controller.
 Signals are never addressed by process name.
-Before each pressure run, the runner requires three quiet checks, two seconds apart, with a 60-second limit; otherwise it skips remaining runs.
+Before each pressure run, the runner requires three quiet checks, two seconds apart, with a 60-second limit and non-growing swap; otherwise it skips remaining runs.
 An emergency abort stops the sequence for inspection.
 
 Each run uses a temporary home, a unique recovery marker key and `notifications = false`.
@@ -133,3 +134,12 @@ Tiny recovery mode uses the same completion path with 32 MiB and an eight-second
 Scenario 2 fills large chunks sequentially from a pre-generated random 1 MiB page pattern.
 This removes entropy generation from the timed allocation path while avoiding an all-zero payload.
 The requested ramp is three seconds; the allocation-target event records the actual achieved rise time under pressure.
+
+## Approved heavier Mac memory rerun
+
+The separately approved `--mac-memory-rerun` profile requires `--pressure --mac-approved` and an explicit scenario 1, 2 or 8.
+It raises the total allocation ceiling to 10240 MiB and the per-run swap-growth emergency stop to 2048 MiB.
+Scenario 8 selects its memory condition only in this profile.
+All other deadlines, owned-identity checks and emergency stops remain in force.
+Stop Lima, check for concurrent builds, record ambient memory, then use `--memory-mib` to select ambient free memory plus about 3 GiB within that ceiling.
+This profile is not permission to run pressure without the user's approval.
