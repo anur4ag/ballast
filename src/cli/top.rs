@@ -103,6 +103,12 @@ pub fn run() -> io::Result<()> {
         .spawn(move || {
             let mut client = None;
             loop {
+                if QUIT.load(Ordering::Relaxed) {
+                    // Backstop: a quit signal ends the process even if the UI thread is stuck
+                    // inside a terminal library call.
+                    std::thread::sleep(Duration::from_secs(2));
+                    std::process::exit(1);
+                }
                 let began = Instant::now();
                 let mut result = (|| {
                     if client.is_none() {
@@ -183,7 +189,13 @@ pub fn run() -> io::Result<()> {
                 redraw = false;
                 last_draw = Instant::now();
             }
-            if event::poll(Duration::from_millis(100))? {
+            match poll_tty(100) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+                Ok(true) => break,
+                Ok(false) => {}
+            }
+            if event::poll(Duration::ZERO)? {
                 match event::read()? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         match key.code {
@@ -214,8 +226,29 @@ pub fn run() -> io::Result<()> {
         }
         Ok(())
     })();
+    // Closing the terminal is a normal way to leave top, even mid-draw. A dead terminal has
+    // nothing to restore, and ratatui's eprintln! of restore failures would panic on it.
+    if poll_tty(0).unwrap_or(false) {
+        std::mem::forget(terminal);
+        return Ok(());
+    }
     ratatui::restore();
     result
+}
+
+/// Waits up to `timeout_ms` for terminal input and reports whether the terminal hung up.
+/// crossterm's reader loops forever on a hung-up tty (EOF and EIO never read as
+/// WouldBlock) without returning to check QUIT, so it must only see a live terminal.
+fn poll_tty(timeout_ms: libc::c_int) -> io::Result<bool> {
+    let mut tty = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut tty, 1, timeout_ms) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(tty.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
 }
 
 // These accents exceed 4.5:1 on both black and white; text labels also convey state.
