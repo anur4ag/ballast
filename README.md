@@ -16,7 +16,6 @@ Install once, then keep using your agents as usual.
 ## Install
 
 Alpha software for macOS 11+ (Apple Silicon and Intel) and Linux (amd64 and arm64).
-Package installation becomes available with the first published release.
 
 **macOS**
 
