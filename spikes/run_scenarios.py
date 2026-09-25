@@ -336,7 +336,7 @@ def run_one(args, scenario, enforced, hardware):
                 swap_growth_mib=2048 if args.mac_memory_rerun else 384)
     plan['throttle_profile'] = args.mac_throttle
     if args.mac_throttle:
-        plan.update(memory_mib=1024, write_mib=960, file_mib=128,
+        plan.update(memory_mib=1024, write_mib=800, file_mib=128,
                     cores=8 if scenario==9 else min(os.cpu_count() or 1, 10),
                     corpus=str(temp/'read-corpus'), lint_corpus=str(temp/'lint-corpus'),
                     read_corpus_mib=16, lint_files=256, probe_write_mib=8,
@@ -402,8 +402,7 @@ def run_one(args, scenario, enforced, hardware):
         return child
     try:
         if args.mac_throttle:
-            # All bulk writes per half: 960 MiB load + 16 MiB corpus + <=8 MiB probe.
-            # Leaves 40 MiB inside the 1 GiB cap for bounded trace/config output.
+            # Reserve room inside the complete pass's 2 GiB budget for all probes and traces.
             with open(plan['corpus'], 'wb', buffering=0) as corpus:
                 block = os.urandom(MIB)
                 for _ in range(plan['read_corpus_mib']):
@@ -542,7 +541,7 @@ def run_one(args, scenario, enforced, hardware):
         throttle_rows = [(t, (t.get('note') or {}).get('throttle') or {}) for t in trace]
         result['throttle_levels'] = {
             key: sorted({v.get(key, 'Normal') for _,v in throttle_rows})
-            for key in ('cpu_level', 'io_level')}
+            for key in ('cpu_level', 'io_level') if any(key in v for _,v in throttle_rows)}
         result['throttle_transitions'] = [d for d in decisions if d.get('event') in ('throttle', 'unthrottle', 'throttle_pressure_transition')]
         result['baseline_actions_are_observe_only'] = not enforced
         result['collector_tick_wall_ns'] = percentiles([t['tick_wall_ns'] for t in trace if t.get('guardian_tick') and not t.get('discarded')])

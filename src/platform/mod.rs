@@ -119,9 +119,6 @@ pub trait Platform {
             "throttling unavailable",
         ))
     }
-    fn process_io_bytes(&self, _id: ProcessIdentity) -> Option<u64> {
-        None
-    }
     fn capabilities(&self) -> Capabilities;
     /// Persist alongside process identities; discard saved entries from a different boot.
     fn boot_id(&self) -> io::Result<String>;

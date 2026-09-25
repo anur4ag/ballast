@@ -349,8 +349,7 @@ fn run_with_targets(
             }
             observer.set_fast_polling(
                 guardian.level != Level::Normal
-                    || guardian.throttle.view.cpu_level != Level::Normal
-                    || guardian.throttle.view.io_level != Level::Normal,
+                    || guardian.throttle.view.cpu_level != Level::Normal,
             );
             next.status.tick_interval_ms = observer.interval().as_millis() as u64;
             next.status.pressure_level = guardian.level;

@@ -331,9 +331,8 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
     ])];
     if let Some(t) = s.guardian.as_ref().and_then(|n| n.throttle.as_ref()) {
         header.push(Line::from(format!(
-            "CPU {:?} · I/O {:?} · {} {}",
+            "CPU {:?} · {} {}",
             t.cpu_level,
-            t.io_level,
             t.workloads.len(),
             if matches!(s.status.mode, crate::daemon::files::Mode::Observe) {
                 "would throttle"

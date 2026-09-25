@@ -18,9 +18,6 @@ pub struct Inputs {
     pub cpu_total_ticks: u64,
     pub cpu_count: u32,
     pub load_per_core: f64,
-    pub io_time_ns: Option<u64>,
-    pub io_bytes: Option<u64>,
-    pub io_devices: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -28,7 +25,6 @@ pub struct Inputs {
 pub struct Thresholds {
     pub cpu_busy_fraction: f64,
     pub cpu_load_per_core: f64,
-    pub io_busy_fraction: f64,
     pub agent_resource_share: f64,
 }
 impl Default for Thresholds {
@@ -36,20 +32,15 @@ impl Default for Thresholds {
         Self {
             cpu_busy_fraction: 0.9,
             cpu_load_per_core: 1.0,
-            io_busy_fraction: 0.8,
             agent_resource_share: 0.3,
         }
     }
 }
 impl Thresholds {
     pub fn valid(&self) -> bool {
-        [
-            self.cpu_busy_fraction,
-            self.io_busy_fraction,
-            self.agent_resource_share,
-        ]
-        .iter()
-        .all(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
+        [self.cpu_busy_fraction, self.agent_resource_share]
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
             && self.cpu_load_per_core.is_finite()
             && self.cpu_load_per_core > 0.0
     }
@@ -66,11 +57,9 @@ pub struct ThrottledWorkload {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct View {
     pub cpu_level: Level,
-    pub io_level: Level,
     pub cpu_busy_fraction: Option<f64>,
-    pub io_busy_fraction: Option<f64>,
     pub agent_cpu_share: Option<f64>,
-    pub agent_io_share: Option<f64>,
+    pub throttled_cpu_share: Option<f64>,
     pub workloads: Vec<ThrottledWorkload>,
 }
 
@@ -288,15 +277,10 @@ pub struct Controller {
     mode: Mode,
     thresholds: Thresholds,
     cpu: Elevated,
-    io: Elevated,
     busy: RateWindow,
     total: RateWindow,
-    io_time: RateWindow,
-    io_bytes: RateWindow,
-    devices: Option<u64>,
     cores: Option<u32>,
     cpu_rates: HashMap<ProcessIdentity, RateWindow>,
-    io_rates: HashMap<ProcessIdentity, RateWindow>,
     ineligible: HashMap<String, Instant>,
     restoring: bool,
 }
@@ -316,15 +300,10 @@ impl Controller {
             mode,
             thresholds,
             cpu: Elevated::default(),
-            io: Elevated::default(),
             busy: RateWindow::default(),
             total: RateWindow::default(),
-            io_time: RateWindow::default(),
-            io_bytes: RateWindow::default(),
-            devices: None,
             cores: None,
             cpu_rates: HashMap::new(),
-            io_rates: HashMap::new(),
             ineligible: HashMap::new(),
             restoring: false,
         }
@@ -394,9 +373,6 @@ impl Controller {
             .filter(|id| !remaining.iter().any(|w| &w.workload_id == id))
             .collect();
         self.view.workloads = unselected.into_iter().chain(remaining).collect();
-        if matches!(self.mode, Mode::Enforce) {
-            write(&self.paths, &self.boot, &self.view.workloads)?;
-        }
         for id in &restored {
             self.record(log, "unthrottle", id)?;
         }
@@ -456,7 +432,7 @@ impl Controller {
                 self.enabled && platform.supports_throttle() && !snapshot.status.sample_discarded
             })
             .filter(|p| p.cpu_count > 0 && p.load_per_core.is_finite());
-        let old_levels = (self.view.cpu_level, self.view.io_level);
+        let old_level = self.view.cpu_level;
         if self.cores != input.map(|p| p.cpu_count) {
             self.busy = RateWindow::default();
             self.total = RateWindow::default();
@@ -473,32 +449,10 @@ impl Controller {
             .zip(total)
             .filter(|(_, t)| *t > 0.0)
             .map(|(b, t)| (b / t).clamp(0.0, 1.0));
-        if self.devices != input.map(|p| p.io_devices) {
-            self.io_time = RateWindow::default();
-            self.io_bytes = RateWindow::default();
-            self.io_rates.clear();
-            self.devices = input.map(|p| p.io_devices);
-        }
-        self.view.io_busy_fraction = self
-            .io_time
-            .sample(now, input.and_then(|p| p.io_time_ns), WINDOW)
-            .map(|v| v / 1e9);
-        let io_rate = self
-            .io_bytes
-            .sample(now, input.and_then(|p| p.io_bytes), WINDOW);
-        self.view.cpu_level = self.cpu.sample(
-            now,
-            self.view.cpu_busy_fraction.zip(input).map(|(busy, p)| {
-                busy > self.thresholds.cpu_busy_fraction
-                    && p.load_per_core > self.thresholds.cpu_load_per_core
-            }),
-        );
-        self.view.io_level = self.io.sample(
-            now,
-            self.view
-                .io_busy_fraction
-                .map(|v| v > self.thresholds.io_busy_fraction),
-        );
+        let host_high = self.view.cpu_busy_fraction.zip(input).map(|(busy, p)| {
+            busy > self.thresholds.cpu_busy_fraction
+                && p.load_per_core > self.thresholds.cpu_load_per_core
+        });
         let batches: HashSet<_> = snapshot
             .attribution
             .workloads
@@ -519,7 +473,8 @@ impl Controller {
             })
             .collect();
         let mut live = HashSet::new();
-        let (mut cpu_share, mut io_share) = (0.0, 0.0);
+        let owned: HashSet<_> = self.watched().collect();
+        let (mut cpu_share, mut owned_cpu) = (0.0, 0.0);
         for p in &snapshot.processes {
             if p.uid != unsafe { libc::geteuid() } || !eligible.contains_key(&p.identity) {
                 continue;
@@ -531,49 +486,43 @@ impl Controller {
                 WINDOW,
             ) {
                 cpu_share += v / 1e9;
-            }
-            let bytes = if self.view.io_level == Level::Elevated {
-                platform.process_io_bytes(p.identity)
-            } else {
-                None
-            };
-            if let Some(v) = self
-                .io_rates
-                .entry(p.identity)
-                .or_default()
-                .sample(now, bytes, WINDOW)
-            {
-                io_share += v;
+                if owned.contains(&p.identity) {
+                    owned_cpu += v / 1e9;
+                }
             }
         }
         self.cpu_rates.retain(|id, _| live.contains(id));
-        self.io_rates.retain(|id, _| live.contains(id));
-        self.view.agent_cpu_share = self
+        let host_cpu = self
             .view
             .cpu_busy_fraction
             .zip(input)
-            .filter(|(b, _)| *b > 0.0)
-            .map(|(b, p)| (cpu_share / (b * f64::from(p.cpu_count))).clamp(0.0, 1.0));
-        self.view.agent_io_share = io_rate
-            .filter(|v| *v > 0.0)
-            .map(|v| (io_share / v).clamp(0.0, 1.0));
-        if old_levels != (self.view.cpu_level, self.view.io_level) {
+            .filter(|(busy, _)| *busy > 0.0)
+            .map(|(busy, p)| busy * f64::from(p.cpu_count));
+        self.view.agent_cpu_share = host_cpu.map(|cpu| (cpu_share / cpu).clamp(0.0, 1.0));
+        self.view.throttled_cpu_share = host_cpu.map(|cpu| (owned_cpu / cpu).clamp(0.0, 1.0));
+        // Throttling reduces host busy time before the workload's demand goes away.
+        self.view.cpu_level = self.cpu.sample(
+            now,
+            host_high.map(|high| {
+                high || (old_level == Level::Elevated
+                    && self
+                        .view
+                        .throttled_cpu_share
+                        .is_some_and(|share| share >= self.thresholds.agent_resource_share))
+            }),
+        );
+        if old_level != self.view.cpu_level {
             self.record(log, "throttle_pressure_transition", "")?;
         }
-        if self.view.cpu_level == Level::Normal && self.view.io_level == Level::Normal {
+        if self.view.cpu_level == Level::Normal {
             self.release(None, platform, log)?;
             return Ok(());
         }
-        let fault = (self.view.cpu_level == Level::Elevated
+        let fault = host_high == Some(true)
             && self
                 .view
                 .agent_cpu_share
-                .is_some_and(|v| v >= self.thresholds.agent_resource_share))
-            || (self.view.io_level == Level::Elevated
-                && self
-                    .view
-                    .agent_io_share
-                    .is_some_and(|v| v >= self.thresholds.agent_resource_share));
+                .is_some_and(|share| share >= self.thresholds.agent_resource_share);
         let observed: HashSet<_> = snapshot.processes.iter().map(|p| p.identity).collect();
         let mut obsolete = HashSet::new();
         for w in &self.view.workloads {
@@ -601,6 +550,9 @@ impl Controller {
         for id in &obsolete {
             self.release(Some(id), platform, log)?;
         }
+        let mut added_members = Vec::new();
+        let mut new_workloads = Vec::new();
+        let mut changed = false;
         for w in snapshot
             .attribution
             .workloads
@@ -653,9 +605,7 @@ impl Controller {
                 if let Some(i) = prior {
                     if self.view.workloads[i].preserved != preserved {
                         self.view.workloads[i].preserved = preserved;
-                        if matches!(self.mode, Mode::Enforce) {
-                            write(&self.paths, &self.boot, &self.view.workloads)?;
-                        }
+                        changed = true;
                     }
                 }
                 continue;
@@ -671,9 +621,18 @@ impl Controller {
             });
             self.view.workloads[index].preserved = preserved;
             self.view.workloads[index].processes.extend(&added);
+            changed = true;
+            added_members.extend(added);
+            if prior.is_none() {
+                new_workloads.push(w.id.clone());
+            }
+        }
+        if changed {
             if matches!(self.mode, Mode::Enforce) {
                 write(&self.paths, &self.boot, &self.view.workloads)?;
-                for id in added {
+            }
+            if matches!(self.mode, Mode::Enforce) {
+                for id in added_members {
                     if let Err(e) = platform.set_backgrounded(id, true) {
                         if !gone(&e) {
                             return Err(e);
@@ -681,8 +640,8 @@ impl Controller {
                     }
                 }
             }
-            if prior.is_none() {
-                self.record(log, "throttle", &w.id)?;
+            for id in new_workloads {
+                self.record(log, "throttle", &id)?;
             }
         }
         Ok(())

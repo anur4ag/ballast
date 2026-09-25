@@ -155,9 +155,6 @@ fn heavy_cpu(step: u64) -> PressureInputs {
             cpu_total_ticks: step * 1000,
             cpu_count: 1,
             load_per_core: 2.0,
-            io_time_ns: Some(0),
-            io_bytes: Some(0),
-            io_devices: 1,
         }),
         ..Default::default()
     }
@@ -170,9 +167,6 @@ fn quiet_cpu() -> PressureInputs {
             cpu_total_ticks: 1000,
             cpu_count: 1,
             load_per_core: 0.1,
-            io_time_ns: Some(0),
-            io_bytes: Some(0),
-            io_devices: 1,
         }),
         ..Default::default()
     }

@@ -353,7 +353,7 @@ impl Installation {
         check(
             "throttling",
             Ok(if cfg!(target_os = "macos") {
-                "macOS DARWIN_BG: reversible CPU and I/O background policy"
+                "macOS DARWIN_BG: CPU-triggered reversible CPU and I/O background policy"
             } else {
                 "not supported on Linux in v0.1"
             }),

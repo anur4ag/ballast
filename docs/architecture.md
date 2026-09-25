@@ -40,7 +40,6 @@ log_rotations = 3
 [throttle_pressure]
 cpu_busy_fraction = 0.9
 cpu_load_per_core = 1.0
-io_busy_fraction = 0.8
 agent_resource_share = 0.3
 ```
 
@@ -55,17 +54,18 @@ See the [CLI and JSON reference](cli.md) for snapshot and report schemas.
 
 ## macOS throttling
 
-CPU and I/O have separate Normal/Elevated levels with two-sample entry and ten-second descent.
-CPU uses a two-second busy-tick window plus one-minute load divided by core count.
-The I/O candidate uses block-driver service-time nanoseconds divided by elapsed time.
-These initial thresholds require foreground-latency calibration; service time is not a calibrated disk-utilization measure.
-Only agent Batch workloads with a significant combined CPU or disk-byte share can start a throttle.
-A throttled workload stays backgrounded while either level remains elevated, so its own reduced resource share does not undo the throttle.
+CPU has Normal/Elevated levels with two-sample entry and ten-second descent.
+Entry requires a two-second host busy fraction above 0.9, one-minute load per core above 1.0, and eligible Batch workloads holding at least 30% of host CPU activity.
+Once throttled, the journaled workloads' own CPU share keeps Elevated active while it remains at least 30%, even if backgrounding reduces host busy time.
+When both the host entry condition and that demand condition stop holding, ten seconds of quiet releases the throttle.
+Unrelated unthrottled workloads cannot retain the throttle, and new workloads require the host entry condition.
+Independent I/O activation was dropped after the bounded measurement failed to establish foreground disk harm correlated with service-time counters.
+DARWIN_BG still lowers both CPU and disk priority when the CPU trigger acts.
 New live members are journaled and included on subsequent ticks.
 Missing inputs, disabled throttling, failed operations, or loss of eligibility restore priority.
 Memory admission and freezing run independently and take precedence in the tick.
 
-`state/throttled.json` records identities before applying external DARWIN_BG.
+`state/throttled.json` records all newly selected identities in one durable write before applying external DARWIN_BG.
 The policy lowers CPU and disk I/O priority without stopping work and sends no notifications.
 The external background flag is read through `proc_pidinfo`; `getpriority` cannot reliably read another process's state.
 Pre-existing externally backgrounded descendants are recorded as preserved, never claimed as Ballast-owned policy.
@@ -78,3 +78,7 @@ Current attribution assigns a first-seen orphan a detached workload instead of r
 Such an orphan may remain at lower priority until it exits.
 No marker sweep clears background policy that Ballast cannot prove it owns.
 Failed restoration retains journal entries and retries; unreadable or corrupt throttle journals are reported rather than guessed.
+
+Per-process two-second windows miss short-lived CPU workers, so lint-shaped churn remains unprotected in v0.1.
+A future candidate is child CPU accounting from `proc_pid_rusage` on long-lived parents, subtracting previously observed exited-child time to prevent double counting.
+The conservative busy gate also misses contention with substantial overall idle CPU, such as high load concentrated on performance cores or blocked on I/O.

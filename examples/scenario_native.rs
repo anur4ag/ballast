@@ -51,12 +51,6 @@ impl Platform for OwnedPlatform {
         }
         self.native.set_backgrounded(id, enabled)
     }
-    fn process_io_bytes(&self, id: ProcessIdentity) -> Option<u64> {
-        self.owned
-            .contains(&id)
-            .then(|| self.native.process_io_bytes(id))
-            .flatten()
-    }
     fn capabilities(&self) -> Capabilities {
         self.native.capabilities()
     }
@@ -276,8 +270,7 @@ fn monitor(
                     guardian.tick(now, &snapshot, &mut platform, &mut attributor, &mut log)?;
                     observer.set_fast_polling(
                         guardian.level != Level::Normal
-                            || guardian.throttle.view.cpu_level != Level::Normal
-                            || guardian.throttle.view.io_level != Level::Normal,
+                            || guardian.throttle.view.cpu_level != Level::Normal,
                     );
                     next_tick = now + observer.interval();
                 }

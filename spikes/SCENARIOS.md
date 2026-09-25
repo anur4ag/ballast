@@ -106,7 +106,8 @@ python3 spikes/run_scenarios.py --mac-throttle --pressure --mac-approved --scena
 ```
 
 Run each baseline first, inspect its foreground harm and safety result, then select `--mode enforced` only when the comparison is justified.
-The profile refuses automatic `--mode both` so a harmless baseline cannot silently proceed to enforcement.
+The profile uses separate halves so baseline results are inspected before enforcement.
+For the approved ticket 17 pass, the coordinator explicitly authorized each enforced half even after a harmless baseline, for trigger calibration.
 Use scenarios 3, 7, and 9 for CPU saturation, paced disk writes, and lint-shaped file reads plus CPU respectively.
 No Linux run is part of this profile.
 
@@ -115,7 +116,7 @@ No Linux run is part of this profile.
 | Duration per half | 60 seconds active load, then 20 seconds without workload load for natural release and foreground probing |
 | Start gate | Three successive quiet checks with kernel level exactly 1, one-minute load below 10, and known non-growing swap; skip after 60 seconds if unmet |
 | Free space | Refuse start below 15 GiB; controller, disk writer, foreground probe, and independent watchdog stop below that floor |
-| Scenario 7 writes | At most 960 MiB load +16 MiB probe corpus +8 MiB probe writes per half, inside 1 GiB per half and 2 GiB per pair |
+| Scenario 7 writes | At most 800 MiB load +16 MiB probe corpus +8 MiB probe writes per half, inside 1 GiB per half and 2 GiB per pair |
 | Lint shape | Eight concurrent short-lived Python tasks repeatedly opening 256 fixture files and hashing their contents; 64 KiB task buffer, aggregate owned memory stop above 1 GiB |
 | Trace budget | Stop above 32 MiB per half, leaving room inside the disk allowance for diagnostic output |
 | Existing stops | External stop file, swap growth above 384 MiB, two scheduling overshoots above 1000 ms, control-process exit, and independent deadline watchdog remain enabled |
@@ -135,7 +136,8 @@ If fewer than ten post-release seconds are available, report the missing restora
 Baseline uses Guardian Observe behind the same owned-identity platform wrapper, including CPU/I/O input collection and attribution.
 Baseline decision events describe proposed actions only.
 Enforced uses the unchanged Guardian and native reversible policy, with the wrapper rejecting priority operations outside the registered identities.
-The trace records CPU/I/O levels, throttle/unthrottle transitions, remaining throttles before cleanup, and collector wall time per policy tick.
+The trace records the CPU level, throttle/unthrottle transitions, remaining throttles before cleanup, and collector wall time per policy tick.
+Historical ticket 17 captures also contain the rejected independent I/O candidate, which was removed after calibration.
 The collector wall-time comparison is harness overhead evidence, not a full-daemon CPU-cost measurement.
 
 Non-load validation and tiny wiring checks are separately authorized.
@@ -200,3 +202,11 @@ For a capture from a separately instrumented measurement build, `python3 spikes/
 It reports per-phase p50/p99/max, internal deadline headroom and each path's worst internal-call timeline.
 The analyzer generates no load and does not add instrumentation to product builds.
 Hook and daemon phase intervals overlap, so the report rows must not be summed.
+
+## Offline throttle reports and idle timing
+
+`python3 spikes/analyze_throttle.py CAPTURE_DIRECTORY --ambient NORMALIZED_AMBIENT_JSONL --output OUTPUT_DIRECTORY` produces identity-free probe, trigger and timing summaries without generating load.
+The analyzer understands the historical I/O fields and reports release time relative to load end, including a negative value when policy was released before load finished.
+`cargo run --release --example throttle_timing_bench` measures the real core policy on macOS with ten groups of ten owned idle sleepers and fabricated pressure inputs.
+It uses a private temporary home, disables notifications, reaps every sleeper, and reports apply/release plus matching populated Enforce/Observe steady timings.
+It generates no CPU or disk workload, but durable journal writes remain part of the measurement.

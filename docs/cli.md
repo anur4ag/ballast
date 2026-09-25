@@ -284,14 +284,17 @@ See [Install with an agent](install-with-an-agent.md) for the full consent workf
 
 ### macOS throttle state
 
-`guardian.throttle`, when present, contains `cpu_level`, `io_level`, `cpu_busy_fraction`, `io_busy_fraction`, `agent_cpu_share`, `agent_io_share`, and `workloads`.
-The levels are `normal` or `elevated`; fractional measurements are null while unknown.
+`guardian.throttle`, when present, contains `cpu_level`, `cpu_busy_fraction`, `agent_cpu_share`, `throttled_cpu_share`, and `workloads`.
+The CPU level is `normal` or `elevated`; fractional measurements are null while unknown.
 Each workload records `workload_id`, `root`, owned `processes`, and `preserved` identities whose external background policy predates Ballast.
-`pressure.throttle` holds raw host CPU tick, core/load, and candidate I/O counters.
+`pressure.throttle` holds raw host CPU ticks and core/load counters.
 Linux omits these optional fields.
 
-`top` marks `THROTTLED` workloads, or `WOULD THROTTLE` in observe mode, and shows both resource levels.
-`status` text shows resource levels and throttle count.
+`top` marks `THROTTLED` workloads, or `WOULD THROTTLE` in observe mode, and shows the CPU level.
+`status` text shows the CPU level and throttle count.
 `report` displays workload-seconds with separate enforce and observe accounting.
 Decision events include `throttle`, `unthrottle`, and `throttle_pressure_transition` with measured evidence.
 `resume --all` restores throttles as well as freezes, including when the daemon is unavailable.
+
+`throttled_cpu_share` counts only journaled eligible identities and retains Elevated while their demand persists.
+There is no independent I/O trigger; CPU-triggered background policy lowers both CPU and I/O priority.

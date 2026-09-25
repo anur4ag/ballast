@@ -18,13 +18,17 @@ struct FakePlatform {
     boot_id: String,
     rescan: Vec<Process>,
     bg: RefCell<HashMap<ProcessIdentity, bool>>,
-    io_bytes: HashMap<ProcessIdentity, u64>,
     gone: HashSet<ProcessIdentity>,
     fail: HashSet<ProcessIdentity>,
     set_backgrounded_calls: RefCell<Vec<ProcessIdentity>>,
     /// When set, every `set_backgrounded(id, true)` asserts `id` is already in this journal --
     /// the same invariant `guardian::tests`'s FakePlatform checks for SIGSTOP.
     journal: Option<Paths>,
+    /// When set, the FIRST `set_backgrounded(_, true)` call in the test additionally asserts that
+    /// every one of these identities -- not just the one being applied -- is already durable,
+    /// catching a batched-write refactor that lets a later workload's apply race ahead of an
+    /// earlier tick's full journal write.
+    first_apply_expects_journaled: RefCell<Option<Vec<ProcessIdentity>>>,
 }
 impl FakePlatform {
     fn new(boot_id: &str) -> Self {
@@ -61,6 +65,10 @@ impl FakePlatform {
         self.journal = Some(paths);
         self
     }
+    fn expect_all_journaled_by_first_apply(self, ids: Vec<ProcessIdentity>) -> Self {
+        *self.first_apply_expects_journaled.borrow_mut() = Some(ids);
+        self
+    }
     fn is_backgrounded(&self, id: ProcessIdentity) -> bool {
         self.bg.borrow().get(&id).copied().unwrap_or(false)
     }
@@ -85,6 +93,7 @@ impl Platform for FakePlatform {
         Ok(self.is_backgrounded(id))
     }
     fn set_backgrounded(&self, id: ProcessIdentity, enabled: bool) -> io::Result<()> {
+        let is_first_apply = enabled && self.set_backgrounded_calls.borrow().is_empty();
         self.set_backgrounded_calls.borrow_mut().push(id);
         if enabled && let Some(paths) = &self.journal {
             let saved = read(paths).expect("journal must precede every native apply");
@@ -92,6 +101,20 @@ impl Platform for FakePlatform {
                 saved.workloads.iter().any(|w| w.processes.contains(&id)),
                 "background-apply identity must already be journaled: {id:?}"
             );
+            if is_first_apply {
+                if let Some(expected) = &*self.first_apply_expects_journaled.borrow() {
+                    for expected_id in expected {
+                        assert!(
+                            saved
+                                .workloads
+                                .iter()
+                                .any(|w| w.processes.contains(expected_id)),
+                            "at the tick's FIRST native apply, every newly-selected identity must \
+                             already be journaled (batched durability), missing: {expected_id:?}"
+                        );
+                    }
+                }
+            }
         }
         if self.gone.contains(&id) {
             return Err(io::Error::from_raw_os_error(libc::ESRCH));
@@ -104,9 +127,6 @@ impl Platform for FakePlatform {
         }
         self.bg.borrow_mut().insert(id, enabled);
         Ok(())
-    }
-    fn process_io_bytes(&self, id: ProcessIdentity) -> Option<u64> {
-        self.io_bytes.get(&id).copied()
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -313,9 +333,6 @@ fn heavy_cpu(step: u64) -> PressureInputs {
             cpu_total_ticks: step * 1000,
             cpu_count: 1,
             load_per_core: 2.0,
-            io_time_ns: Some(0),
-            io_bytes: Some(0),
-            io_devices: 1,
         }),
         ..Default::default()
     }
@@ -330,9 +347,6 @@ fn quiet_cpu() -> PressureInputs {
             cpu_total_ticks: 1000,
             cpu_count: 1,
             load_per_core: 0.1,
-            io_time_ns: Some(0),
-            io_bytes: Some(0),
-            io_devices: 1,
         }),
         ..Default::default()
     }
@@ -784,45 +798,6 @@ fn throttle_and_unthrottle_decisions_are_logged_with_the_workload_id() {
 }
 
 #[test]
-fn io_level_needs_two_consecutive_over_threshold_samples_to_enter_elevated() {
-    let home = TestHome::new("io-hysteresis-enter");
-    let mut controller = Controller::new(
-        home.0.clone(),
-        "boot-1".into(),
-        Mode::Enforce,
-        true,
-        Thresholds::default(),
-    );
-    let mut platform = FakePlatform::new("boot-1");
-    let mut log = home.log();
-    let now = Instant::now();
-    let empty = attribution(Vec::new(), Vec::new());
-    let heavy_io = |step: u64| PressureInputs {
-        throttle: Some(Inputs {
-            cpu_busy_ticks: 0,
-            cpu_total_ticks: 1000,
-            cpu_count: 1,
-            load_per_core: 0.1,
-            io_time_ns: Some(step * 900_000_000),
-            io_bytes: Some(step),
-            io_devices: 1,
-        }),
-        ..Default::default()
-    };
-    for (n, expect) in [(0, Level::Normal), (1, Level::Normal), (2, Level::Elevated)] {
-        controller
-            .tick(
-                now + Duration::from_secs(n),
-                &snapshot(Some(heavy_io(n)), empty.clone(), Vec::new()),
-                &mut platform,
-                &mut log,
-            )
-            .unwrap();
-        assert_eq!(controller.view.io_level, expect, "sample {n}");
-    }
-}
-
-#[test]
 fn an_invalid_sample_releases_everything_immediately_without_waiting_for_exit_hysteresis() {
     let (mut controller, mut platform, mut log, _home, root) =
         run_to_elevated_with_agent_share("invalid-sample", 500_000_000);
@@ -1122,3 +1097,329 @@ fn attrib_with_late(
 // and `cli_offline_resume_recovers_a_throttled_process_...`): they share the same
 // "spawn a real owned process and drive it through Guardian::tick" fixture, and `CARGO_BIN_EXE_*`
 // is only set for integration tests, not this crate's `--lib` unit tests, so neither can live here.
+
+// Regression for the aggregate-demand retention rule: there is only ONE global `cpu_level`
+// hysteresis (`Controller::cpu`); its "still high" input is
+// `host_high || (already Elevated && throttled_cpu_share >= threshold)`, where
+// `throttled_cpu_share` is the aggregate CPU share of already-JOURNALED (owned) identities, not
+// an independent per-workload timer. w1 (already journaled) must stay throttled purely because
+// ITS OWN aggregate share keeps that composite true even once the host itself has recovered, and
+// once w1's own demand drops the SAME single hysteresis eventually releases it. Meanwhile a
+// second, unrelated, never-journaled workload w2 must never get newly throttled while the host
+// itself never re-crosses the entry threshold -- new members require *current* `host_high`, not
+// merely a retained `Elevated` level -- and w2's own high demand must not hold w1 either, since
+// the aggregate is computed over journaled/owned identities only.
+#[test]
+fn w1_is_retained_by_aggregate_journaled_share_and_releases_on_its_own_demand_while_unjournaled_w2_never_gets_newly_throttled()
+ {
+    struct HostCounter {
+        busy: u64,
+        total: u64,
+    }
+    impl HostCounter {
+        fn sample(&mut self, busy_per_mille: u64, load_per_core: f64) -> PressureInputs {
+            self.busy += busy_per_mille;
+            self.total += 1000;
+            PressureInputs {
+                throttle: Some(Inputs {
+                    cpu_busy_ticks: self.busy,
+                    cpu_total_ticks: self.total,
+                    cpu_count: 1,
+                    load_per_core,
+                }),
+                ..Default::default()
+            }
+        }
+    }
+
+    let home = TestHome::new("demand-hold");
+    let mut controller = Controller::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Enforce,
+        true,
+        Thresholds::default(),
+    );
+    let root = id(900, 1); // w1: already journaled
+    let other = id(901, 1); // w2: unrelated, never-journaled Batch workload, appears in phase 3
+    let mut platform = FakePlatform::new("boot-1").rescan_with(vec![process(root, 1)]);
+    let mut log = home.log();
+    let now = Instant::now();
+    let mut host = HostCounter { busy: 0, total: 0 };
+    let mut w1_ns = 0u64;
+    let attrib_w1 = attribution(
+        vec![workload("w1", root, WorkloadClass::Batch)],
+        vec![workload_attribution(root, "w1")],
+    );
+
+    // Phase 1 -- entry: two consecutive over-threshold host samples (busy .95, load 2.0); w1's
+    // own share (~0.5/0.95 ~= 53%) clears the 30% default threshold.
+    for n in 0..=2u64 {
+        let host_input = host.sample(950, 2.0);
+        w1_ns += 500_000_000;
+        let snap = snapshot(
+            Some(host_input),
+            attrib_w1.clone(),
+            vec![process_with_cpu(root, 1, w1_ns)],
+        );
+        controller
+            .tick(now + Duration::from_secs(n), &snap, &mut platform, &mut log)
+            .unwrap();
+    }
+    assert_eq!(
+        controller.view.workloads.len(),
+        1,
+        "sanity: w1 must have been throttled"
+    );
+
+    // Phase 2 -- host busy drops to .6 (below the .9 entry threshold) for 12s, well past the 10s
+    // exit hysteresis, but w1's own demand keeps climbing at the same rate: its aggregate
+    // (journaled-only) share stays >= 30%, so the single global hysteresis' composite "still
+    // high" input stays true and w1 must not release just because the host itself recovered.
+    for n in 3..=14u64 {
+        let host_input = host.sample(600, 0.5);
+        w1_ns += 500_000_000;
+        let snap = snapshot(
+            Some(host_input),
+            attrib_w1.clone(),
+            vec![process_with_cpu(root, 1, w1_ns)],
+        );
+        controller
+            .tick(now + Duration::from_secs(n), &snap, &mut platform, &mut log)
+            .unwrap();
+    }
+    assert_eq!(
+        controller.view.workloads.len(),
+        1,
+        "w1's own aggregate demand must keep the single global hysteresis elevated past host recovery"
+    );
+    assert!(platform.is_backgrounded(root));
+
+    // Phase 3 -- w1's own demand now drops to 0 (its cpu_time_ns stops growing); a second,
+    // unrelated, never-throttled Batch workload w2 appears with its own high demand while the
+    // host stays at the same moderate level (never re-crosses the entry threshold). w2 must never
+    // get newly throttled -- new entries require current `host_high`, not merely a retained
+    // Elevated level -- and w2's high demand must not keep w1 held, since the aggregate is over
+    // journaled/owned identities only.
+    let attrib_both = attribution(
+        vec![
+            workload("w1", root, WorkloadClass::Batch),
+            workload("w2", other, WorkloadClass::Batch),
+        ],
+        vec![
+            workload_attribution(root, "w1"),
+            workload_attribution(other, "w2"),
+        ],
+    );
+    platform.set_rescan(vec![process(root, 1), process(other, 1)]);
+    let mut w2_ns = 0u64;
+    for n in 15..=26u64 {
+        let host_input = host.sample(600, 0.5);
+        w2_ns += 500_000_000;
+        let snap = snapshot(
+            Some(host_input),
+            attrib_both.clone(),
+            vec![
+                process_with_cpu(root, 1, w1_ns),
+                process_with_cpu(other, 1, w2_ns),
+            ],
+        );
+        controller
+            .tick(now + Duration::from_secs(n), &snap, &mut platform, &mut log)
+            .unwrap();
+    }
+    assert!(
+        !controller
+            .view
+            .workloads
+            .iter()
+            .any(|w| w.workload_id == "w1"),
+        "w1's own demand dropped and stayed low; it must eventually release"
+    );
+    assert!(!platform.is_backgrounded(root));
+    assert!(
+        !controller
+            .view
+            .workloads
+            .iter()
+            .any(|w| w.workload_id == "w2"),
+        "w2 must never get newly throttled while the host itself never re-crosses the entry \
+         threshold, regardless of its own high demand"
+    );
+    assert!(
+        !platform.is_backgrounded(other),
+        "w2 must never even be applied"
+    );
+}
+
+// Extends the_journal_is_written_before_any_native_apply_call to two workloads newly added in the
+// SAME tick, catching batching bugs: it inspects, at the moment of the tick's FIRST native apply
+// call, that BOTH newly-selected identities (not just whichever one is about to be applied) are
+// already durable -- a per-identity-only check would still pass a refactor that journals
+// incrementally per workload (write w1 -> apply w1 -> write w1+w2 -> apply w2), which leaves w2
+// briefly un-journaled while w1's apply is in flight. Also asserts a steady-state tick never
+// reapplies an already-backgrounded, unchanged member.
+#[test]
+fn all_newly_selected_workloads_in_a_tick_are_journaled_before_the_ticks_first_native_apply_and_unchanged_members_are_never_reapplied()
+ {
+    let home = TestHome::new("journal-multi");
+    let mut controller = Controller::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Enforce,
+        true,
+        Thresholds::default(),
+    );
+    let root = id(710, 1);
+    let other = id(711, 1);
+    let mut platform = FakePlatform::new("boot-1")
+        .rescan_with(vec![process(root, 1), process(other, 1)])
+        .with_journal(home.0.clone())
+        .expect_all_journaled_by_first_apply(vec![root, other]);
+    let mut log = home.log();
+    let now = Instant::now();
+    let attrib = attribution(
+        vec![
+            workload("w1", root, WorkloadClass::Batch),
+            workload("w2", other, WorkloadClass::Batch),
+        ],
+        vec![
+            workload_attribution(root, "w1"),
+            workload_attribution(other, "w2"),
+        ],
+    );
+    let step = |n: u64| {
+        snapshot(
+            Some(heavy_cpu(n)),
+            attrib.clone(),
+            vec![
+                process_with_cpu(root, 1, n * 500_000_000),
+                process_with_cpu(other, 1, n * 500_000_000),
+            ],
+        )
+    };
+    // FakePlatform's set_backgrounded asserts BOTH root and other are already journaled at the
+    // FIRST apply call this tick; reaching tick 2 without panicking proves the whole batch (not
+    // just whichever identity is being applied) was durable before any native apply ran.
+    for n in 0..=2 {
+        controller
+            .tick(
+                now + Duration::from_secs(n),
+                &step(n),
+                &mut platform,
+                &mut log,
+            )
+            .unwrap();
+    }
+    assert_eq!(controller.view.workloads.len(), 2);
+    assert!(platform.is_backgrounded(root) && platform.is_backgrounded(other));
+    let calls_after_entry = platform.set_backgrounded_calls().len();
+    assert_eq!(
+        calls_after_entry, 2,
+        "exactly one apply call per newly-added member, no more"
+    );
+
+    // A further tick with no membership change at all must not reapply either member.
+    controller
+        .tick(
+            now + Duration::from_secs(3),
+            &step(3),
+            &mut platform,
+            &mut log,
+        )
+        .unwrap();
+    assert_eq!(
+        platform.set_backgrounded_calls().len(),
+        calls_after_entry,
+        "an unchanged member must never be reapplied on a steady-state tick"
+    );
+}
+
+// Regression for the fail-open fix: a newly-eligible child that fork-inherits its already-
+// throttled parent's BG is staged directly into `self.view.workloads` in-memory as soon as it's
+// discovered, not into a clone that a later failure in the same tick could discard. If the tick's
+// journal write then fails -- so the native apply loop never runs and nothing new is enabled --
+// the error-driven `release(None, ...)` that `tick()` triggers must still find and clear that
+// child from the in-memory state, even once its parent has since exited and a fresh recovery scan
+// can no longer reach the child by walking the process tree from the parent.
+#[test]
+fn a_child_discovered_mid_tick_is_cleared_by_the_fail_open_release_even_after_its_parent_exits_and_the_journal_write_fails()
+ {
+    let home = TestHome::new("orphaned-child-fail-open");
+    let mut controller = Controller::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Enforce,
+        true,
+        Thresholds::default(),
+    );
+    let root = id(1000, 1); // w1
+    let child = id(1001, 1); // newly eligible in the tick that fails; already fork-inherits BG
+    let mut platform = FakePlatform::new("boot-1").rescan_with(vec![process(root, 1)]);
+    let mut log = home.log();
+    let now = Instant::now();
+    let attrib_root_only = attribution(
+        vec![workload("w1", root, WorkloadClass::Batch)],
+        vec![workload_attribution(root, "w1")],
+    );
+
+    // Ramp w1 up to Elevated and journaled/backgrounded normally first (two consecutive
+    // over-threshold host samples), exactly as every other entry scenario in this file does.
+    for n in 0..=2u64 {
+        let snap = snapshot(
+            Some(heavy_cpu(n)),
+            attrib_root_only.clone(),
+            vec![process_with_cpu(root, 1, n * 500_000_000)],
+        );
+        controller
+            .tick(now + Duration::from_secs(n), &snap, &mut platform, &mut log)
+            .unwrap();
+    }
+    assert_eq!(
+        controller.view.workloads.len(),
+        1,
+        "sanity: w1 must already be throttled"
+    );
+    assert!(platform.is_backgrounded(root));
+
+    // Now the child appears: a legitimate new worker under w1 that already reads backgrounded --
+    // true, simulating OS fork inheritance from its already-throttled parent. The parent has
+    // since exited; only the reparented child remains, so a fresh recovery scan can no longer
+    // discover it by walking the process tree from `root`.
+    platform.seed_backgrounded(child, true);
+    platform.set_rescan(vec![process(child, 1)]);
+    let attrib_with_child = attribution(
+        vec![workload("w1", root, WorkloadClass::Batch)],
+        vec![
+            workload_attribution(root, "w1"),
+            workload_attribution(child, "w1"),
+        ],
+    );
+    let snap = snapshot(
+        Some(heavy_cpu(3)),
+        attrib_with_child,
+        vec![
+            process_with_cpu(root, 1, 3 * 500_000_000),
+            process(child, root.pid),
+        ],
+    );
+
+    // Force the journal write itself to fail once this tick tries to persist the newly-discovered
+    // child, by turning `state` from a directory into a plain file.
+    std::fs::remove_dir_all(home.0.base.join("state")).unwrap();
+    std::fs::write(home.0.base.join("state"), b"blocked").unwrap();
+
+    let result = controller.tick(now + Duration::from_secs(3), &snap, &mut platform, &mut log);
+    assert!(
+        result.is_err(),
+        "the forced journal-write failure must surface as a tick error"
+    );
+    // The journal write is `?`-propagated before the native enable loop even starts, so no
+    // enable call for `child` can have happened this tick; only the fail-open release's own
+    // clearing call may have touched it.
+    assert!(
+        !platform.is_backgrounded(child),
+        "the newly-discovered, in-memory-staged child must still be cleared by the same tick's \
+         fail-open release, even though its parent has since exited and the journal write failed"
+    );
+}

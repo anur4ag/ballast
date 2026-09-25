@@ -9,7 +9,6 @@ use std::sync::OnceLock;
 unsafe extern "C" {
     fn ballast_listening_port(pid: i32, fd: i32) -> i32;
     fn ballast_process_cwd(pid: i32, path: *mut libc::c_char, capacity: usize) -> i32;
-    fn ballast_disk_counters(time_ns: *mut u64, bytes: *mut u64, fingerprint: *mut u64) -> i32;
     fn mach_port_deallocate(task: u32, name: u32) -> i32;
 }
 
@@ -142,24 +141,6 @@ impl Platform for NativePlatform {
         Ok(())
     }
 
-    fn process_io_bytes(&self, id: ProcessIdentity) -> Option<u64> {
-        if !Self::matches(id) {
-            return None;
-        }
-        let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::proc_pid_rusage(
-                id.pid,
-                libc::RUSAGE_INFO_V2,
-                (&mut usage as *mut libc::rusage_info_v2).cast(),
-            )
-        };
-        (result == 0 && Self::matches(id)).then(|| {
-            usage
-                .ri_diskio_bytesread
-                .saturating_add(usage.ri_diskio_byteswritten)
-        })
-    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             environment: true,
@@ -385,9 +366,6 @@ impl Platform for NativePlatform {
             .filter(|n| *n > 0);
         let mut load = [0.0; 3];
         let load_ok = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) } == 3;
-        let (mut io_time, mut io_bytes, mut devices) = (0, 0, 0);
-        let io_ok =
-            unsafe { ballast_disk_counters(&mut io_time, &mut io_bytes, &mut devices) } == 0;
         let throttle = cores.filter(|_| cpu_ok && load_ok).map(|cores| {
             let ticks = cpu.cpu_ticks.map(u64::from);
             crate::guardian::throttle::Inputs {
@@ -395,9 +373,6 @@ impl Platform for NativePlatform {
                 cpu_total_ticks: ticks.iter().sum(),
                 cpu_count: cores,
                 load_per_core: load[0] / f64::from(cores),
-                io_time_ns: io_ok.then_some(io_time),
-                io_bytes: io_ok.then_some(io_bytes),
-                io_devices: devices,
             }
         });
         Ok(PressureInputs {
