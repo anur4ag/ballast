@@ -129,8 +129,8 @@ fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
             .unwrap()
             .keys()
             .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
             "days",
             "from_day",
             "hold_waits",
@@ -139,7 +139,7 @@ fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
             "through_day",
             "totals",
             "updated_at_ms"
-        ]
+        ])
     );
 }
 #[test]
