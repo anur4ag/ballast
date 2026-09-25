@@ -670,11 +670,15 @@ fn top_exits_when_its_terminal_hangs_up() {
     let mut child = command.spawn().expect("spawn ballast top");
     drop(command);
 
-    // Wait for a drawn frame so the hangup lands inside top's event loop.
+    // Wait for a drawn frame so the hangup lands inside top's event loop. Match single words:
+    // ratatui redraws only changed cells, so a later frame's phrase can arrive split up.
     let mut output = std::fs::File::from(master);
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !String::from_utf8_lossy(&seen).contains("Daemon unreachable") {
+    while !["Connecting", "unreachable"]
+        .iter()
+        .any(|word| String::from_utf8_lossy(&seen).contains(word))
+    {
         assert!(Instant::now() < deadline, "ballast top drew no frame");
         let mut ready = libc::pollfd {
             fd: std::os::fd::AsRawFd::as_raw_fd(&output),
