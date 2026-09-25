@@ -622,6 +622,82 @@ fn cli_status_without_a_daemon_fails_open_instead_of_hanging() {
 }
 
 #[test]
+fn top_exits_when_its_terminal_hangs_up() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+
+    let home = TempHome::new("tophup");
+    let (mut master, mut slave) = (-1, -1);
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+    // Otherwise top inherits the master, and closing ours would never hang up the pty.
+    assert_ne!(
+        unsafe { libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) },
+        -1
+    );
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ballast"));
+    command
+        .arg("top")
+        .env("BALLAST_HOME", &home.path)
+        .stdin(slave.try_clone().expect("dup pty"))
+        .stdout(slave.try_clone().expect("dup pty"))
+        .stderr(slave);
+    // Make the pty the child's controlling terminal, as a terminal emulator does.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("spawn ballast top");
+    drop(command);
+
+    // Wait for a drawn frame so the hangup lands inside top's event loop.
+    let mut output = std::fs::File::from(master);
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !String::from_utf8_lossy(&seen).contains("Daemon unreachable") {
+        assert!(Instant::now() < deadline, "ballast top drew no frame");
+        let mut ready = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&output),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut ready, 1, 100) } > 0 {
+            let mut chunk = [0u8; 4096];
+            let n = std::io::Read::read(&mut output, &mut chunk).expect("read frame");
+            seen.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    // Closing the terminal hangs up the pty; top must exit instead of spinning.
+    drop(output);
+    let status = wait_exit(&mut child, Duration::from_secs(5));
+    assert!(
+        status.success(),
+        "top should exit cleanly on hangup: {status:?}"
+    );
+}
+
+#[test]
 fn daemon_refuses_to_start_as_root() {
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("skipping daemon_refuses_to_start_as_root: test process is not running as root");
