@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / 'target/release/examples/scenario_native'
 BALLAST = ROOT / 'target/release/ballast'
 MIB = 1024 * 1024
+THROTTLE_FREE_BYTES = 15 * 1024 * MIB
 
 
 def rows(path):
@@ -55,6 +56,22 @@ def register(plan, pid):
 
 def active(plan):
     return time.monotonic() < plan['deadline_monotonic'] and not Path(plan['stop']).exists()
+
+
+def load_active(plan):
+    return active(plan) and time.time() < plan.get('load_deadline', plan['deadline'])
+
+
+def lint_task(plan):
+    # Eight concurrent children, each with one 64 KiB buffer, plus interpreter overhead.
+    # The controller also stops on aggregate owned memory above 1 GiB.
+    register(plan, os.getpid())
+    for source in sorted(Path(plan['lint_corpus']).iterdir()):
+        if not load_active(plan):
+            break
+        data = source.read_bytes()
+        for _ in range(16):
+            hashlib.sha256(data).digest()
 
 
 def wait_until(plan, deadline):
@@ -158,17 +175,38 @@ def worker(plan, kind, index):
         written = 0
         disk_path = Path(plan['dir']) / 'io-load'
         with disk_path.open('w+b', buffering=0) as f:
-            while active(plan) and written < plan['write_mib'] * MIB:
+            while load_active(plan) and written < plan['write_mib'] * MIB:
+                if plan.get('throttle_profile') and shutil.disk_usage(plan['dir']).free < THROTTLE_FREE_BYTES:
+                    Path(plan['stop']).touch()
+                    break
                 f.write(block)
                 os.fsync(f.fileno())
                 written += len(block)
                 if f.tell() >= plan['file_mib'] * MIB:
                     f.seek(0)
-                wait_until(plan, plan['start'] + (plan['deadline']-plan['start']) * written/(plan['write_mib']*MIB))
+                wait_until(plan, plan['start'] + (plan.get('load_deadline', plan['deadline'])-plan['start']) * written/(plan['write_mib']*MIB))
         emit(Path(plan['events']), event='disk_written', bytes=written)
+    elif kind == 'lint':
+        completed = 0
+        while load_active(plan):
+            with subprocess.Popen([sys.executable, __file__, '--lint-task', '--plan', plan['file']]) as task:
+                while load_active(plan) and task.poll() is None:
+                    time.sleep(.01)
+                if task.poll() is None:
+                    task.terminate()
+                try:
+                    code = task.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    task.kill()
+                    code = task.wait()
+            if code and load_active(plan):
+                emit(Path(plan['events']), event='work_failed', kind=kind, code=code)
+                break
+            completed += code == 0
+        emit(Path(plan['events']), event='lint_completed', tasks=completed)
     elif kind == 'cpu':
         value = 1
-        while active(plan):
+        while load_active(plan):
             for _ in range(10000):
                 value = (value * 1664525 + 1013904223) & 0xffffffff
     else:
@@ -181,6 +219,10 @@ def worker(plan, kind, index):
                 emit(Path(plan['events']), event='task_complete', pid=os.getpid(), allocated_mib=allocated, target_mib=cap)
                 break
             time.sleep(.02)
+    if plan.get('throttle_profile'):
+        emit(Path(plan['events']), event='load_complete', kind=kind, pid=os.getpid())
+        while active(plan):
+            time.sleep(.05)
     emit(Path(plan['events']), event='worker_done', kind=kind, pid=os.getpid(), allocated_mib=allocated, active_s=time.monotonic()-load_started)
 
 
@@ -199,15 +241,52 @@ def probe(plan):
     buffer = bytearray(8*MIB)
     for i in range(0, len(buffer), 4096):
         buffer[i] = 1
-    while active(plan):
-        sample = time.perf_counter()
-        time.sleep(.01)
-        scheduling = max(0, time.perf_counter() - sample - .01)
-        start = time.perf_counter()
-        for i in range(0, len(buffer), 4096):
-            buffer[i] ^= 1
-        emit(Path(plan['probe']), scheduling_ms=scheduling*1000, touch_ms=(time.perf_counter()-start)*1000)
-        time.sleep(max(0, .05-(time.perf_counter()-sample)))
+    disk = None
+    reads = None
+    writes = 0
+    if plan.get('throttle_profile'):
+        import fcntl
+        disk = open(Path(plan['dir'])/'io-probe', 'w+b', buffering=0)
+        reads = open(plan['corpus'], 'rb', buffering=0)
+        fcntl.fcntl(reads.fileno(), 48, 1)  # Darwin F_NOCACHE: measure storage reads, not page-cache hits.
+    try:
+        while active(plan):
+            sample = time.perf_counter()
+            time.sleep(.01)
+            scheduling = max(0, time.perf_counter() - sample - .01)
+            start = time.perf_counter()
+            for i in range(0, len(buffer), 4096):
+                buffer[i] ^= 1
+            values = dict(scheduling_ms=scheduling*1000, touch_ms=(time.perf_counter()-start)*1000)
+            if disk:
+                if shutil.disk_usage(plan['dir']).free < THROTTLE_FREE_BYTES:
+                    Path(plan['stop']).touch()
+                    break
+                start = time.perf_counter()
+                value = 1
+                for _ in range(1000 if plan['dry'] else 100000):
+                    value = (value*1664525+1013904223) & 0xffffffff
+                values['cpu_work_ms'] = (time.perf_counter()-start)*1000
+                if writes < plan['probe_write_mib']*MIB:
+                    start = time.perf_counter()
+                    disk.seek(0)
+                    disk.write(buffer[:4096])
+                    os.fsync(disk.fileno())
+                    values['write_fsync_ms'] = (time.perf_counter()-start)*1000
+                    writes += 4096
+                offset = (time.monotonic_ns() % (plan['read_corpus_mib']*MIB//4096))*4096
+                start = time.perf_counter()
+                if len(os.pread(reads.fileno(), 4096, offset)) != 4096:
+                    raise RuntimeError('short foreground probe read')
+                values['random_read_ms'] = (time.perf_counter()-start)*1000
+                values['phase'] = 'warmup' if time.time() < plan['start'] else 'load' if load_active(plan) else 'tail'
+                values['probe_write_bytes'] = writes
+            emit(Path(plan['probe']), **values)
+            time.sleep(max(0, (.2 if disk else .05)-(time.perf_counter()-sample)))
+    finally:
+        if disk:
+            disk.close()
+            reads.close()
 
 
 def watchdog(plan):
@@ -216,6 +295,9 @@ def watchdog(plan):
     while time.monotonic() < plan['deadline_monotonic'] + 10:
         if cancel.exists():
             return
+        if plan.get('throttle_profile') and shutil.disk_usage(plan['dir']).free < THROTTLE_FREE_BYTES:
+            emit(Path(plan['events']), event='watchdog_low_disk')
+            break
         time.sleep(.1)
     Path(plan['stop']).touch()
     combined = Path(plan['dir'])/'emergency.jsonl'
@@ -241,7 +323,8 @@ def run_one(args, scenario, enforced, hardware):
     label = f'8-{"memory" if scenario==1 else "cpu"}' if args.latency else str(scenario)
     output = args.output / f'{label}-{"enforced" if enforced else "baseline"}'
     output.mkdir(parents=True, exist_ok=False)
-    if shutil.disk_usage(tempfile.gettempdir()).free < (768 if args.pressure else 256)*MIB:
+    minimum_free = THROTTLE_FREE_BYTES if args.mac_throttle else (768 if args.pressure else 256)*MIB
+    if shutil.disk_usage(tempfile.gettempdir()).free < minimum_free:
         raise RuntimeError('insufficient free space for the bounded fixture')
     temp = Path(tempfile.mkdtemp(prefix='ballast-scenario-'))
     plan = dict(file=str(temp/'plan.json'), dir=str(temp), registry=str(temp/'registry.jsonl'),
@@ -251,6 +334,17 @@ def run_one(args, scenario, enforced, hardware):
                 memory_mib=(min(10240 if args.mac_memory_rerun else 7168, int(hardware['total_memory_bytes']/MIB*.96)) if args.pressure else 32),
                 write_mib=8192 if args.pressure else 16, file_mib=128 if args.pressure else 8,
                 swap_growth_mib=2048 if args.mac_memory_rerun else 384)
+    plan['throttle_profile'] = args.mac_throttle
+    if args.mac_throttle:
+        plan.update(memory_mib=1024, write_mib=960, file_mib=128,
+                    cores=8 if scenario==9 else min(os.cpu_count() or 1, 10),
+                    corpus=str(temp/'read-corpus'), lint_corpus=str(temp/'lint-corpus'),
+                    read_corpus_mib=16, lint_files=256, probe_write_mib=8,
+                    corpus_mib=32 if scenario==9 else 16, total_write_cap_mib=1024)
+        if args.throttle_smoke:
+            plan.update(cores=1, write_mib=2, file_mib=1, read_corpus_mib=1,
+                        lint_files=4, probe_write_mib=.125,
+                        corpus_mib=1.25 if scenario==9 else 1, total_write_cap_mib=4)
     plan.update(caller_session=uuid.uuid4().hex, agent_pid_file=str(temp/'agent.pid'), latency_dir=str(output/'hooks'),
                 audit_library=str(ROOT/('target/hook_response_audit.dylib' if sys.platform=='darwin' else 'target/hook_response_audit.so')))
     if args.memory_mib is not None:
@@ -258,10 +352,14 @@ def run_one(args, scenario, enforced, hardware):
             raise ValueError('--memory-mib exceeds the host-scaled hard cap')
         plan['memory_mib'] = args.memory_mib
     duration = (60 if scenario in (3, 7) else 80) if args.pressure else 3
+    if args.mac_throttle:
+        duration = 4 if args.throttle_smoke else 80
     if args.recovery_cycle:
         duration = 720 if args.pressure else 8
     plan['deadline_monotonic'] = time.monotonic()+duration+(3 if args.pressure else 1)
     plan.update(start=time.time() + (3 if args.pressure else 1), deadline=time.time()+duration+ (3 if args.pressure else 1))
+    if args.mac_throttle:
+        plan['load_deadline'] = plan['start']+(2 if args.throttle_smoke else 60)
     plan['finish_after'] = plan['start'] + (90 if args.pressure else 3)
     Path(plan['file']).write_text(json.dumps(plan))
     shutil.copy2(plan['file'], output/'plan.json')
@@ -303,6 +401,20 @@ def run_one(args, scenario, enforced, hardware):
         subprocess.run([str(NATIVE), 'register', plan['controls'], str(child.pid)], check=True)
         return child
     try:
+        if args.mac_throttle:
+            # All bulk writes per half: 960 MiB load + 16 MiB corpus + <=8 MiB probe.
+            # Leaves 40 MiB inside the 1 GiB cap for bounded trace/config output.
+            with open(plan['corpus'], 'wb', buffering=0) as corpus:
+                block = os.urandom(MIB)
+                for _ in range(plan['read_corpus_mib']):
+                    if shutil.disk_usage(temp).free < THROTTLE_FREE_BYTES:
+                        raise RuntimeError('free space below 15 GiB during corpus setup')
+                    corpus.write(block)
+                os.fsync(corpus.fileno())
+            if scenario == 9:
+                Path(plan['lint_corpus']).mkdir()
+                for i in range(plan['lint_files']):
+                    (Path(plan['lint_corpus'])/f'{i}.source').write_bytes(block[:65536])
         daemon = None
         if enforced and sys.platform == 'linux':
             daemon = launch([BALLAST, 'daemon'], 'daemon.log', start_new_session=True)
@@ -311,7 +423,7 @@ def run_one(args, scenario, enforced, hardware):
                 if daemon.poll() is not None:
                     raise RuntimeError('daemon failed to start')
                 time.sleep(.05)
-        mode = ('daemon' if sys.platform=='linux' else 'scoped_ipc' if args.latency else 'scoped') if enforced else 'baseline'
+        mode = ('daemon' if sys.platform=='linux' else 'scoped_ipc' if args.latency else 'scoped') if enforced else 'passive' if args.mac_throttle else 'baseline'
         monitor = launch([NATIVE, 'monitor', plan['registry'], plan['stop'], mode, str(duration+15)], 'trace.jsonl')
         foreground = launch([sys.executable, __file__, '--probe', '--plan', plan['file']], 'probe.log')
         root = launch([claude, 'agent', sys.executable, __file__, plan['file']], 'agent.log', start_new_session=True)
@@ -335,6 +447,18 @@ def run_one(args, scenario, enforced, hardware):
                 swap = latest['inputs'].get('swap_used_bytes') or 0
                 if swap - (initial_pressure.get('swap_used_bytes') or 0) > plan['swap_growth_mib']*MIB:
                     emergency = f"swap growth >{plan['swap_growth_mib']} MiB"
+                if args.mac_throttle:
+                    if (latest.get('note') or {}).get('throttle') is None:
+                        emergency = 'native helper lacks throttle instrumentation; rebuild it'
+                    memory = sum((p.get('metrics') or {}).get('memory_bytes', 0) for p in latest.get('processes', []))
+                    if scenario == 9 and memory > 1024*MIB:
+                        emergency = 'lint owned memory >1 GiB'
+                    if time.time()*1000-latest['time_ms'] > 3000:
+                        emergency = 'pressure observer stalled >3 s'
+            if args.mac_throttle and shutil.disk_usage(temp).free < THROTTLE_FREE_BYTES:
+                emergency = 'free space below 15 GiB'
+            if args.mac_throttle and sum(p.stat().st_size for p in output.rglob('*') if p.is_file()) > 32*MIB:
+                emergency = 'measurement trace budget >32 MiB'
             if len(samples) >= 2 and all(s['scheduling_ms'] > 1000 for s in samples):
                 emergency = 'two scheduling samples >1000 ms'
             if any(c.poll() is not None for c in (monitor, foreground, root)) or (daemon is not None and daemon.poll() is not None):
@@ -350,6 +474,8 @@ def run_one(args, scenario, enforced, hardware):
                 break
             time.sleep(.1)
         code = root.poll()
+        if Path(plan['stop']).exists() and not emergency:
+            emergency = 'worker or foreground probe requested stop'
     finally:
         measurement_end_ms = time.time_ns() // 1_000_000
         Path(plan['stop']).touch()
@@ -395,7 +521,7 @@ def run_one(args, scenario, enforced, hardware):
              for e in events if e['event']=='worker_start'}
     started = [e['kind'] for e in events if e['event']=='worker_start']
     code = root.returncode
-    expected_workers = {1:4, 2:1, 3:plan['cores'], 4:2, 5:2, 6:2, 7:1}[scenario]
+    expected_workers = {1:4, 2:1, 3:plan['cores'], 4:2, 5:2, 6:2, 7:1, 9:plan['cores']}[scenario]
     held = any(a['event']=='hold' for a in actions) and len(started)<expected_workers
     result = dict(scenario=8 if args.latency else scenario, load_scenario=scenario, enforced=enforced, dry=plan['dry'], host=platform.platform(),
                   scope='production daemon and hooks' if sys.platform=='linux' else 'owned Observer/Attributor/Guardian with IPC/Admission' if args.latency else 'owned Observer/Attributor/Guardian; no admission hooks',
@@ -408,6 +534,29 @@ def run_one(args, scenario, enforced, hardware):
                   peak_agent_memory_bytes=max((sum(a['memory']['bytes'] for a in t['attribution']['agents']) for t in trace), default=0),
                   peak_owned_memory_bytes=max((sum((p.get('metrics') or {}).get('memory_bytes',0) for p in t.get('processes',[])) for t in trace), default=0),
                   pressure_levels=sorted({str(t['level']) for t in trace}), samples=len(samples))
+    if args.mac_throttle:
+        result['resource_probes'] = {
+            phase: {key: percentiles([s[key] for s in samples if s.get('phase')==phase and key in s])
+                    for key in ('cpu_work_ms', 'write_fsync_ms', 'random_read_ms')}
+            for phase in ('load', 'tail')}
+        throttle_rows = [(t, (t.get('note') or {}).get('throttle') or {}) for t in trace]
+        result['throttle_levels'] = {
+            key: sorted({v.get(key, 'Normal') for _,v in throttle_rows})
+            for key in ('cpu_level', 'io_level')}
+        result['throttle_transitions'] = [d for d in decisions if d.get('event') in ('throttle', 'unthrottle', 'throttle_pressure_transition')]
+        result['baseline_actions_are_observe_only'] = not enforced
+        result['collector_tick_wall_ns'] = percentiles([t['tick_wall_ns'] for t in trace if t.get('guardian_tick') and not t.get('discarded')])
+        result['remaining_throttles_before_cleanup'] = len(throttle_rows[-1][1].get('workloads', [])) if throttle_rows else None
+        released = next((t['time_ms'] for t,v in throttle_rows
+                         if t['time_ms'] >= plan['load_deadline']*1000 and not v.get('workloads')), None)
+        result['post_release_probe'] = {
+            key: percentiles([s[key] for s in samples if released is not None and s['time_ms']>=released and key in s])
+            for key in ('cpu_work_ms','write_fsync_ms','random_read_ms')}
+        result['post_release_seconds'] = None if released is None else max(0,(measurement_end_ms-released)/1000)
+        result['bulk_write_bytes'] = (plan['corpus_mib']*MIB + max((s.get('probe_write_bytes',0) for s in samples), default=0)
+                                      + sum(e['bytes'] for e in events if e['event']=='disk_written'))
+        if result['bulk_write_bytes'] > plan['total_write_cap_mib']*MIB:
+            raise RuntimeError('throttle measurement exceeded its write cap')
     if args.recovery_cycle:
         timeline = [e for e in decisions if e['event'] in ('freeze','resume','pressure_transition') and e['timestamp_ms'] <= measurement_end_ms]
         result['recovery_cycle'] = dict(complete=len(completed_tasks)==4, measurement_end_ms=measurement_end_ms,
@@ -437,12 +586,19 @@ def run_one(args, scenario, enforced, hardware):
     return result
 
 
-def settle():
+def settle(throttle_profile=False):
     previous, quiet = None, 0
     for _ in range(30):
         now = time.monotonic()
         current = json.loads(subprocess.check_output([str(NATIVE), 'pressure'], text=True))
         normal = current.get('kernel_pressure_level') in (None, 1)
+        if throttle_profile:
+            normal = current.get('kernel_pressure_level') == 1 and os.getloadavg()[0] < 10
+            normal &= shutil.disk_usage(tempfile.gettempdir()).free >= THROTTLE_FREE_BYTES
+            normal &= previous is not None and current.get('swap_used_bytes') is not None
+            if previous:
+                before, after = previous[1].get('swap_used_bytes'), current.get('swap_used_bytes')
+                normal &= before is not None and after is not None and after <= before
         normal &= (current.get('psi_some_avg10') or 0)<5 and (current.get('psi_full_avg10') or 0)<1
         if previous and current.get('swapouts') is not None:
             elapsed, old = previous
@@ -460,19 +616,22 @@ def settle():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--recovery-cycle', action='store_true', help='scenario 1 enforce only: wait for natural recovery and fixed allocation tasks')
-    parser.add_argument('--scenario', type=int, choices=range(1,9))
+    parser.add_argument('--scenario', type=int, choices=range(1,10))
     parser.add_argument('--output', type=Path)
     parser.add_argument('--mode', choices=('baseline', 'enforced', 'both'), default='both')
     parser.add_argument('--memory-mib', type=int, help='lower the host-scaled memory cap')
     parser.add_argument('--pressure', action='store_true')
     parser.add_argument('--mac-approved', action='store_true')
     parser.add_argument('--mac-memory-rerun', action='store_true', help='separately approved Mac memory-only run: 10 GiB cap and 2 GiB swap-growth stop')
+    parser.add_argument('--mac-throttle', action='store_true', help='approved Mac scenarios 3, 7, 9: 60 s load +20 s tail, 1 GiB writes per half, 15 GiB free-space floor')
+    parser.add_argument('--throttle-smoke', action='store_true', help='Mac wiring only: one worker, 2 s load +2 s tail, <=4 MiB data writes per half')
     parser.add_argument('--stop-file', type=Path)
     parser.add_argument('--worker')
     parser.add_argument('--index', type=int, default=0)
     parser.add_argument('--hook', action='store_true')
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--watchdog', action='store_true')
+    parser.add_argument('--lint-task', action='store_true')
     parser.add_argument('--plan', type=Path)
     args = parser.parse_args()
     if args.plan:
@@ -490,8 +649,21 @@ def main():
                 sys.exit(1)
         elif args.probe:
             probe(plan)
+        elif args.lint_task:
+            lint_task(plan)
         return
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    if args.throttle_smoke:
+        if sys.platform != 'darwin' or args.pressure or args.mac_approved:
+            parser.error('--throttle-smoke is Mac-only and cannot use pressure/approval flags')
+        args.mac_throttle = True
+    if args.mac_throttle and (sys.platform != 'darwin' or (not args.throttle_smoke and (not args.pressure or not args.mac_approved))
+                             or args.scenario not in (None,3,7,9) or args.mac_memory_rerun or args.recovery_cycle):
+        parser.error('--mac-throttle requires approved Mac pressure and scenarios 3, 7 or 9')
+    if args.mac_throttle and not args.throttle_smoke and args.mode == 'both':
+        parser.error('--mac-throttle requires --mode baseline or enforced; inspect baseline harm before enforcement')
+    if args.scenario == 9 and not args.mac_throttle:
+        parser.error('scenario 9 requires --mac-throttle')
     if args.mac_memory_rerun and (sys.platform != 'darwin' or not args.pressure or not args.mac_approved or args.scenario not in (1, 2, 8)):
         parser.error('--mac-memory-rerun requires approved Mac pressure and --scenario 1, 2 or 8')
     if args.pressure:
@@ -511,6 +683,8 @@ def main():
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     hardware = json.loads(subprocess.check_output([str(NATIVE), 'pressure'], text=True))
+    if args.mac_throttle and hardware.get('throttle') is None:
+        parser.error('rebuild scenario_native with macOS throttle input support before measuring')
     args.builds = {}
     for binary in (NATIVE, BALLAST):
         with binary.open('rb') as f:
@@ -520,7 +694,7 @@ def main():
     if args.memory_mib is not None and not 1 <= args.memory_mib <= cap:
         parser.error('--memory-mib exceeds the host-scaled hard cap')
     results = []
-    for scenario in ([args.scenario] if args.scenario else range(1,9)):
+    for scenario in ([args.scenario] if args.scenario else (3,7,9) if args.mac_throttle else range(1,9)):
         args.latency = scenario==8
         if args.latency:
             library = ROOT/('target/hook_response_audit.dylib' if sys.platform=='darwin' else 'target/hook_response_audit.so')
@@ -529,7 +703,7 @@ def main():
         for load in ([1] if args.mac_memory_rerun and args.latency else [1,3] if args.latency else [scenario]):
             for enforced in ([True] if args.recovery_cycle else [args.mode=='enforced'] if args.mode!='both' else (False, True)):
                 if args.pressure:
-                    settle()
+                    settle(args.mac_throttle)
                 results.append(run_one(args, load, enforced, hardware))
     table = ['| Scenario | Mode | Sleep p99 ms | Touch p99 ms | First action s | Outcome | Cleanup |', '| --- | --- | ---: | ---: | ---: | --- | --- |']
     for r in results:

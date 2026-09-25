@@ -94,6 +94,55 @@ It then compares rolling 5-second and 10-second counter rates and kernel-only in
 The output contains complete JSON timelines, a summary table and every upward native transition with its input, rate window and duration.
 This is threshold evidence, not an enforcement effectiveness test.
 
+## Ticket 17 Mac throttle profile
+
+The full `--mac-throttle` profile requires explicit user approval through the coordinator before measurement runs.
+The flag itself is not permission.
+After approval, rebuild the release helper and binary from the prepared source before using the profile.
+
+```sh
+cargo build --release --bin ballast --example scenario_native
+python3 spikes/run_scenarios.py --mac-throttle --pressure --mac-approved --scenario 3 --mode baseline --output /tmp/ballast-throttle --stop-file /tmp/ballast-emergency-stop
+```
+
+Run each baseline first, inspect its foreground harm and safety result, then select `--mode enforced` only when the comparison is justified.
+The profile refuses automatic `--mode both` so a harmless baseline cannot silently proceed to enforcement.
+Use scenarios 3, 7, and 9 for CPU saturation, paced disk writes, and lint-shaped file reads plus CPU respectively.
+No Linux run is part of this profile.
+
+| Bound | Ticket 17 profile |
+| --- | --- |
+| Duration per half | 60 seconds active load, then 20 seconds without workload load for natural release and foreground probing |
+| Start gate | Three successive quiet checks with kernel level exactly 1, one-minute load below 10, and known non-growing swap; skip after 60 seconds if unmet |
+| Free space | Refuse start below 15 GiB; controller, disk writer, foreground probe, and independent watchdog stop below that floor |
+| Scenario 7 writes | At most 960 MiB load +16 MiB probe corpus +8 MiB probe writes per half, inside 1 GiB per half and 2 GiB per pair |
+| Lint shape | Eight concurrent short-lived Python tasks repeatedly opening 256 fixture files and hashing their contents; 64 KiB task buffer, aggregate owned memory stop above 1 GiB |
+| Trace budget | Stop above 32 MiB per half, leaving room inside the disk allowance for diagnostic output |
+| Existing stops | External stop file, swap growth above 384 MiB, two scheduling overshoots above 1000 ms, control-process exit, and independent deadline watchdog remain enabled |
+| Additional stop | Pressure observer stale for more than three seconds |
+
+The lint task is a file-read and CPU process-shape stand-in, not a real Node or Nx benchmark.
+All corpora and load/probe files live in the private temporary directory and are removed by normal or watchdog cleanup.
+Scenario 9 has a separate 16 MiB small-file corpus and no disk load writer.
+The 1 GiB lint limit is an aggregate sampled-memory emergency stop, not a kernel memory limit; fixed task buffers keep planned allocation far below it.
+
+The foreground probe records a fixed 100000-iteration CPU unit, 4 KiB write-plus-fsync latency, and uncached 4 KiB random-read latency on the same volume as the load.
+It retains the existing scheduling and page-touch probes.
+Load and recovery-tail percentiles are separate, with a further post-release subset and its observed duration.
+Workers remain alive but idle throughout the tail so natural policy release can be observed before cleanup restores anything.
+If fewer than ten post-release seconds are available, report the missing restoration evidence rather than extending the run.
+
+Baseline uses Guardian Observe behind the same owned-identity platform wrapper, including CPU/I/O input collection and attribution.
+Baseline decision events describe proposed actions only.
+Enforced uses the unchanged Guardian and native reversible policy, with the wrapper rejecting priority operations outside the registered identities.
+The trace records CPU/I/O levels, throttle/unthrottle transitions, remaining throttles before cleanup, and collector wall time per policy tick.
+The collector wall-time comparison is harness overhead evidence, not a full-daemon CPU-cost measurement.
+
+Non-load validation and tiny wiring checks are separately authorized.
+`python3 spikes/run_scenarios.py --throttle-smoke --output /tmp/ballast-throttle-smoke` checks both modes of scenarios 3, 7, and 9 with one worker, two seconds active plus two seconds idle, and at most 4 MiB data writes per half.
+This mode rejects pressure and approval flags and cannot expand to the measurement caps.
+It proves wiring and cleanup, not foreground benefit or sustained contention.
+
 ## Hook latency under load
 
 Scenario 8 runs ten concurrent release-build hooks for each of three commands under both memory and CPU load.
