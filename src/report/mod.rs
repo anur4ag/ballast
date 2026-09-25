@@ -28,6 +28,7 @@ pub struct Freezes {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Totals {
+    pub throttled_workload_ms: u64,
     pub observed_ms: u64,
     pub elevated_ms: u64,
     pub critical_ms: u64,
@@ -127,6 +128,7 @@ impl Totals {
     fn add(&mut self, other: &Self) {
         macro_rules! sum { ($($f:ident),*) => { $(self.$f += other.$f;)* }; }
         sum!(
+            throttled_workload_ms,
             observed_ms,
             elevated_ms,
             critical_ms,
@@ -346,6 +348,7 @@ pub(crate) enum Message {
         observe: bool,
         level: Option<String>,
         frozen: Vec<(String, u64, bool)>,
+        throttled: Vec<String>,
     },
 }
 #[derive(Default)]
@@ -422,6 +425,12 @@ impl Worker {
             level: (!s.status.sample_discarded && s.pressure.is_some())
                 .then(|| level(s.status.pressure_level)),
             frozen,
+            throttled: s
+                .guardian
+                .iter()
+                .filter_map(|n| n.throttle.as_ref())
+                .flat_map(|t| t.workloads.iter().map(|w| w.workload_id.clone()))
+                .collect(),
         })
     }
 }
@@ -492,6 +501,7 @@ struct Comparison {
     before: String,
 }
 struct Engine {
+    throttled: HashMap<String, (u64, bool)>,
     store: Store,
     previous: Option<(u64, bool, Option<String>)>,
     frozen: HashMap<String, Frozen>,
@@ -502,6 +512,7 @@ impl Engine {
     fn new(store: Store) -> Self {
         Self {
             store,
+            throttled: HashMap::new(),
             previous: None,
             frozen: HashMap::new(),
             comparisons: Vec::new(),
@@ -519,6 +530,7 @@ impl Engine {
                 observe,
                 level,
                 frozen,
+                throttled,
             } => {
                 if let Some((last, mode, Some(previous))) = self.previous.take() {
                     if at >= last && at - last <= 5000 && level.is_some() && mode == observe {
@@ -538,6 +550,12 @@ impl Engine {
                 }
                 self.previous = Some((at, observe, level.clone()));
                 self.advance_frozen(at);
+                self.advance_throttled(at);
+                self.throttled
+                    .retain(|id, (_, mode)| *mode == observe && throttled.contains(id));
+                for id in throttled {
+                    self.throttled.entry(id).or_insert((at, observe));
+                }
                 let mut memories: HashMap<(bool, String), (u64, bool)> = HashMap::new();
                 for (id, bytes, complete) in frozen {
                     if let Some(f) = self.frozen.get(&id) {
@@ -613,10 +631,37 @@ impl Engine {
             f.last = at;
         }
     }
+    fn advance_throttled(&mut self, at: u64) {
+        for (last, observe) in self.throttled.values_mut() {
+            if at < *last {
+                continue;
+            }
+            if at - *last <= 5000 {
+                let mut cursor = *last;
+                while cursor < at {
+                    let end = next_midnight(cursor).min(at);
+                    self.store.totals(cursor, *observe).throttled_workload_ms += end - cursor;
+                    cursor = end;
+                }
+            }
+            *last = at;
+        }
+    }
     fn decision(&mut self, at: u64, event: &str, v: &Value) {
         let observe = v["mode"] == "observe";
         let d = &v["decision"];
         match event {
+            "throttle" => {
+                if let Some(id) = d["workload_id"].as_str() {
+                    self.throttled.entry(id.to_owned()).or_insert((at, observe));
+                }
+            }
+            "unthrottle" => {
+                self.advance_throttled(at);
+                if let Some(id) = d["workload_id"].as_str() {
+                    self.throttled.remove(id);
+                }
+            }
             "freeze" => {
                 let Some(id) = d["workload_id"].as_str() else {
                     return;

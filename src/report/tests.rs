@@ -9,19 +9,20 @@ fn event(e: &mut Engine, at: u64, name: &str, details: Value) {
         details,
     });
 }
-fn sample(e: &mut Engine, at: u64, level: Option<&str>) {
+fn sample(e: &mut Engine, at: u64, level: Option<&str>, throttled: &[&str]) {
     e.apply(Message::Sample {
         at,
         observe: false,
         level: level.map(str::to_owned),
         frozen: vec![("private-workload".into(), 1024, true)],
+        throttled: throttled.iter().map(|id| (*id).to_owned()).collect(),
     });
 }
 #[test]
 fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
     let at = crate::daemon::unix_ms();
     let mut e = Engine::new(Store::default());
-    sample(&mut e, at, Some("elevated"));
+    sample(&mut e, at, Some("elevated"), &[]);
     event(
         &mut e,
         at,
@@ -33,6 +34,7 @@ fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
             &mut e,
             at + i * 1000,
             Some(if i < 15 { "critical" } else { "normal" }),
+            &[],
         );
     }
     event(
@@ -144,14 +146,14 @@ fn recorded_outcomes_cover_every_metric_without_retaining_identifiers() {
 fn local_midnight_splits_durations_prunes_and_restart_keeps_unknown_comparisons() {
     let midnight = next_midnight(crate::daemon::unix_ms());
     let mut e = Engine::new(Store::default());
-    sample(&mut e, midnight - 1000, Some("critical"));
+    sample(&mut e, midnight - 1000, Some("critical"), &[]);
     event(
         &mut e,
         midnight - 1000,
         "freeze",
         json!({"level":"critical", "decision":{"workload_id":"private-workload","agent_kind":"codex"}}),
     );
-    sample(&mut e, midnight + 1000, Some("critical"));
+    sample(&mut e, midnight + 1000, Some("critical"), &[]);
     assert_eq!(
         e.store.days[&day_offset(midnight - 1, 0)]
             .enforce
@@ -171,7 +173,7 @@ fn local_midnight_splits_durations_prunes_and_restart_keeps_unknown_comparisons(
     e.store.prune(midnight);
     assert_eq!(e.store.days.len(), 90);
     let mut restarted = Engine::new(e.store);
-    sample(&mut restarted, midnight + 60_000, Some("normal"));
+    sample(&mut restarted, midnight + 60_000, Some("normal"), &[]);
     let t = restarted
         .store
         .report(7, midnight + 60_000)
@@ -188,12 +190,57 @@ fn local_midnight_splits_durations_prunes_and_restart_keeps_unknown_comparisons(
 fn invalid_samples_and_clock_gaps_do_not_invent_pressure_time() {
     let at = crate::daemon::unix_ms();
     let mut e = Engine::new(Store::default());
-    sample(&mut e, at, Some("critical"));
-    sample(&mut e, at + 6000, Some("critical"));
-    sample(&mut e, at + 7000, None);
-    sample(&mut e, at + 8000, Some("normal"));
-    sample(&mut e, at + 5000, Some("normal"));
+    sample(&mut e, at, Some("critical"), &[]);
+    sample(&mut e, at + 6000, Some("critical"), &[]);
+    sample(&mut e, at + 7000, None, &[]);
+    sample(&mut e, at + 8000, Some("normal"), &[]);
+    sample(&mut e, at + 5000, Some("normal"), &[]);
     assert!(e.store.days.is_empty());
+}
+#[test]
+fn throttled_workload_ms_sums_overlapping_workloads_as_workload_seconds() {
+    // Two workloads throttled at once must both keep accruing -- this is workload-seconds,
+    // not deduplicated wall-clock time, so the total can (and here does) exceed elapsed time.
+    let at = crate::daemon::unix_ms();
+    let mut e = Engine::new(Store::default());
+    sample(&mut e, at, Some("normal"), &["w1"]);
+    sample(&mut e, at + 1000, Some("normal"), &["w1", "w2"]);
+    sample(&mut e, at + 2000, Some("normal"), &["w1", "w2"]);
+    sample(&mut e, at + 3000, Some("normal"), &["w2"]); // w1 released here
+    let totals = &e.store.report(1, at + 3000).unwrap().totals.enforce;
+    // w1: at..at+3000 = 3000ms (credited through the sample where it disappears).
+    // w2: at+1000..at+3000 = 2000ms. 3000ms of wall clock, 5000ms of workload-seconds.
+    assert_eq!(totals.throttled_workload_ms, 5000);
+}
+#[test]
+fn throttled_workload_ms_does_not_extrapolate_across_a_crash_gap() {
+    let at = crate::daemon::unix_ms();
+    let mut e = Engine::new(Store::default());
+    sample(&mut e, at, Some("normal"), &["w1"]);
+    // A 100s gap between samples -- e.g. the daemon was down -- must not be invented as
+    // throttled time, the same way a >5s pressure-level gap invents nothing above.
+    sample(&mut e, at + 100_000, Some("normal"), &["w1"]);
+    assert_eq!(
+        e.store
+            .report(1, at + 100_000)
+            .unwrap()
+            .totals
+            .enforce
+            .throttled_workload_ms,
+        0,
+        "a >5s gap between samples must not be extrapolated as throttled time"
+    );
+    // Accounting must resume normally once samples are close together again.
+    sample(&mut e, at + 101_000, Some("normal"), &["w1"]);
+    assert_eq!(
+        e.store
+            .report(1, at + 101_000)
+            .unwrap()
+            .totals
+            .enforce
+            .throttled_workload_ms,
+        1000
+    );
 }
 #[test]
 fn observe_and_enforce_are_separate_and_old_schema_defaults() {
@@ -310,7 +357,7 @@ fn a_late_confirmed_exit_keeps_its_last_observed_memory() {
         "clean",
         json!({"mode":"enforce","decision":{"process":process,"signal":"Kill","error":null,"memory_bytes":512,"agent":{"state":"ended"}}}),
     );
-    sample(&mut e, at + 700_000, Some("normal"));
+    sample(&mut e, at + 700_000, Some("normal"), &[]);
     event(
         &mut e,
         at + 700_000,
@@ -362,6 +409,7 @@ fn idle_samples_coalesce_and_clean_shutdown_flushes_without_losing_totals() {
             observe: false,
             level: Some("normal".into()),
             frozen: vec![],
+            throttled: vec![],
         });
     }
     // Dropping the owner flushes even if a decision producer still holds a recorder.
@@ -437,6 +485,7 @@ fn stalled_writer_does_not_block_ticks_or_lose_cumulative_updates() {
                 observe: false,
                 level: Some("normal".into()),
                 frozen: vec![],
+                throttled: vec![],
             });
             recorder.record(Message::Decision {
                 at: at + tick * 1000,

@@ -34,6 +34,23 @@ struct OwnedPlatform {
     owned: HashSet<ProcessIdentity>,
 }
 impl Platform for OwnedPlatform {
+    fn supports_throttle(&self) -> bool {
+        self.native.supports_throttle()
+    }
+    fn backgrounded(&self, id: ProcessIdentity) -> io::Result<bool> {
+        if !identities(&self.registry)?.contains(&id) {
+            return Err(io::Error::other("probe rejected non-worker priority read"));
+        }
+        self.native.backgrounded(id)
+    }
+    fn set_backgrounded(&self, id: ProcessIdentity, enabled: bool) -> io::Result<()> {
+        if !identities(&self.registry)?.contains(&id) {
+            return Err(io::Error::other(
+                "probe rejected non-worker priority change",
+            ));
+        }
+        self.native.set_backgrounded(id, enabled)
+    }
     fn capabilities(&self) -> Capabilities {
         self.native.capabilities()
     }
@@ -172,6 +189,17 @@ fn monitor(
         },
         config.pressure.clone(),
     );
+    guardian.throttle = ballast::guardian::throttle::Controller::new(
+        paths.clone(),
+        boot_id.clone(),
+        if mode == "passive" {
+            Mode::Observe
+        } else {
+            Mode::Enforce
+        },
+        config.throttle,
+        config.throttle_pressure.clone(),
+    );
     let mut log = RotatingLog::open(paths.base.join("log/decisions.jsonl"), &config)?;
     let mut attributor = Attributor::new(config.markers, config.shells);
     let mut observer = Observer::default();
@@ -240,7 +268,10 @@ fn monitor(
             if matches!(mode, "scoped" | "scoped_ipc" | "passive") {
                 if due {
                     guardian.tick(now, &snapshot, &mut platform, &mut attributor, &mut log)?;
-                    observer.set_fast_polling(guardian.level != Level::Normal);
+                    observer.set_fast_polling(
+                        guardian.level != Level::Normal
+                            || guardian.throttle.view.cpu_level != Level::Normal,
+                    );
                     next_tick = now + observer.interval();
                 }
                 level = Some(guardian.level);
@@ -267,9 +298,10 @@ fn monitor(
                 snapshot.held = admission.held();
                 snapshot.guardian = Some(guardian.note.clone());
             }
+            let tick_wall_ns = now.elapsed().as_nanos();
             println!(
                 "{}",
-                serde_json::json!({"time_ms": ballast::daemon::unix_ms(), "elapsed_s": now.duration_since(start).as_secs_f64(), "guardian_tick": due, "discarded": discard, "note": guardian.note, "inputs":raw,"level":level,"frozen":frozen,"attribution":snapshot.attribution, "processes":snapshot.processes})
+                serde_json::json!({"time_ms": ballast::daemon::unix_ms(), "elapsed_s": now.duration_since(start).as_secs_f64(), "guardian_tick": due, "tick_wall_ns":tick_wall_ns,"discarded": discard, "note": guardian.note, "inputs":raw,"level":level,"frozen":frozen,"attribution":snapshot.attribution, "processes":snapshot.processes})
             );
             io::stdout().flush()?;
             if mode == "scoped_ipc" && due {
@@ -335,7 +367,12 @@ fn monitor(
         Ok(())
     })();
     if matches!(mode, "scoped" | "scoped_ipc") {
-        guardian.resume(None, Instant::now(), &platform, &mut log)?;
+        let frozen = guardian.resume(None, Instant::now(), &platform, &mut log);
+        let throttled = guardian
+            .throttle
+            .resume(None, Instant::now(), &mut platform, &mut log);
+        frozen?;
+        throttled?;
     }
     result
 }
@@ -373,6 +410,7 @@ fn agent(python: &str, script: &str, plan_path: &str) -> Result<(), Box<dyn std:
         5 => vec!["mcp"],
         6 => vec!["launcher"],
         7 => vec!["disk"],
+        9 => vec!["lint"; plan["cores"].as_u64().ok_or("cores")? as usize],
         _ => return Err("scenario".into()),
     };
     if plan["cpu_hold_memory"] == true {

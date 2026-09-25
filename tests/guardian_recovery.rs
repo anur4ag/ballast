@@ -1,6 +1,23 @@
 //! Real-daemon recovery checks using test-owned children, seeded journals and temporary homes.
 //! Daemons run in observe mode; marked fixtures re-exec this test binary so macOS can read their environment.
 
+#[cfg(target_os = "macos")]
+use ballast::attribution::{
+    AttributionSnapshot, Attributor, MemorySummary, ProcessAttribution, ProcessRole, Workload,
+    WorkloadClass,
+};
+#[cfg(target_os = "macos")]
+use ballast::daemon::files::{Config, Mode, Paths, RotatingLog};
+#[cfg(target_os = "macos")]
+use ballast::daemon::{ProcessChanges, Snapshot, Status};
+#[cfg(target_os = "macos")]
+use ballast::guardian::throttle::Inputs as ThrottleInputs;
+#[cfg(target_os = "macos")]
+use ballast::guardian::{Guardian, Thresholds as GuardianThresholds};
+#[cfg(target_os = "macos")]
+use ballast::platform::Process;
+#[cfg(target_os = "macos")]
+use ballast::platform::{Capabilities, PressureInputs, ProcessMetrics};
 use ballast::platform::{NativePlatform, Platform, ProcessIdentity};
 use std::fs;
 use std::os::unix::io::AsRawFd;
@@ -23,7 +40,7 @@ struct TempHome {
     marker: String,
 }
 impl TempHome {
-    fn new(tag: &str) -> Self {
+    fn with_config(tag: &str, config: impl FnOnce(&str) -> String) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = format!(
             "{:x}-{:x}",
@@ -37,15 +54,24 @@ impl TempHome {
         );
         fs::create_dir_all(&path).expect("create temp BALLAST_HOME");
         let marker = format!("BALLAST_RECOVERY_{}", unique.replace('-', "_"));
-        fs::write(
-            path.join("config.toml"),
+        fs::write(path.join("config.toml"), config(&marker)).expect("write config.toml");
+        TempHome { path, marker }
+    }
+    fn new(tag: &str) -> Self {
+        Self::with_config(tag, |marker| {
             format!(
                 "mode = \"observe\"\nnotifications = false\nrecovery_sweep_markers = [{marker:?}]\n\
                  [[markers]]\nkey = {marker:?}\nlevel = \"agent\"\nkind = \"test\"\n"
-            ),
-        )
-        .expect("write isolated observe-mode config.toml");
-        TempHome { path, marker }
+            )
+        })
+    }
+    /// No markers, no sweep at all: isolates a throttle-only recovery scenario from the
+    /// independent frozen-workload marker sweep this file's other fixtures exercise.
+    #[cfg(target_os = "macos")]
+    fn new_throttle_only(tag: &str) -> Self {
+        Self::with_config(tag, |_marker| {
+            "notifications = false\nrecovery_sweep_markers = []\n".to_string()
+        })
     }
     fn frozen_json_path(&self) -> PathBuf {
         self.path.join("state").join("frozen.json")
@@ -62,6 +88,16 @@ impl TempHome {
         let bytes = fs::read(self.frozen_json_path()).expect("read frozen.json");
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("frozen.json must be valid JSON after recovery: {e}"))
+    }
+    #[cfg(target_os = "macos")]
+    fn throttled_json_path(&self) -> PathBuf {
+        self.path.join("state").join("throttled.json")
+    }
+    #[cfg(target_os = "macos")]
+    fn read_throttled_json(&self) -> serde_json::Value {
+        let bytes = fs::read(self.throttled_json_path()).expect("read throttled.json");
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("throttled.json must be valid JSON after recovery: {e}"))
     }
 }
 impl Drop for TempHome {
@@ -99,6 +135,183 @@ fn frozen_workload_entry(label: &str, root: ProcessIdentity) -> serde_json::Valu
         "processes": [root],
         "frozen_at_ms": 0,
     })
+}
+
+// Throttle (background-priority) fixtures: shared by the native Guardian round trip and the CLI
+// offline-recovery test below, so the "drive Guardian::tick against one real owned process until
+// it throttles" scenario is written once, not duplicated between an in-process assertion and a
+// pre-crash setup step.
+#[cfg(target_os = "macos")]
+const THROTTLE_WORKLOAD_ID: &str = "throttle-fixture";
+
+/// CPU-only pressure whose busy/total ratio settles at 0.95 (over the 0.9 default threshold)
+/// with `load_per_core` at 2.0 (over the 1.0 default): two consecutive samples promote the host
+/// to Elevated.
+#[cfg(target_os = "macos")]
+fn heavy_cpu(step: u64) -> PressureInputs {
+    PressureInputs {
+        throttle: Some(ThrottleInputs {
+            cpu_busy_ticks: step * 950,
+            cpu_total_ticks: step * 1000,
+            cpu_count: 1,
+            load_per_core: 2.0,
+        }),
+        ..Default::default()
+    }
+}
+#[cfg(target_os = "macos")]
+fn quiet_cpu() -> PressureInputs {
+    PressureInputs {
+        throttle: Some(ThrottleInputs {
+            cpu_busy_ticks: 0,
+            cpu_total_ticks: 1000,
+            cpu_count: 1,
+            load_per_core: 0.1,
+        }),
+        ..Default::default()
+    }
+}
+/// A synthetic `Snapshot` naming `identity` as the sole member of a Batch workload with
+/// `cpu_time_ns` set to `ns` (the fault-gating agent-CPU-share signal), or an empty attribution
+/// snapshot when `identity` is `None` (used to drive the quiet release tick).
+#[cfg(target_os = "macos")]
+fn throttle_snapshot(
+    capabilities: Capabilities,
+    pressure: PressureInputs,
+    identity: Option<ProcessIdentity>,
+    ns: u64,
+) -> Snapshot {
+    let processes: Vec<Process> = identity
+        .into_iter()
+        .map(|id| Process {
+            identity: id,
+            ppid: 1,
+            pgid: id.pid,
+            uid: unsafe { libc::geteuid() },
+            stopped: false,
+            name: None,
+            exe: None,
+            argv: None,
+            metrics: Some(ProcessMetrics {
+                memory_bytes: 0,
+                cpu_time_ns: ns,
+            }),
+        })
+        .collect();
+    let workloads = identity
+        .into_iter()
+        .map(|id| Workload {
+            id: THROTTLE_WORKLOAD_ID.into(),
+            agent_id: "agent".into(),
+            root: id,
+            label: THROTTLE_WORKLOAD_ID.into(),
+            class: WorkloadClass::Batch,
+            first_seen_ms: 0,
+            detached_pgid: None,
+            memory: MemorySummary {
+                bytes: 0,
+                complete: true,
+                growth_30s_bytes: None,
+                growth_bytes_per_sec: None,
+            },
+        })
+        .collect();
+    let attribution_processes = identity
+        .into_iter()
+        .map(|id| ProcessAttribution {
+            identity: id,
+            owner_id: None,
+            agent_id: Some("agent".into()),
+            workload_id: Some(THROTTLE_WORKLOAD_ID.into()),
+            role: ProcessRole::Workload,
+            environment_known: true,
+            listening_ports: None,
+            ports_sampled_at_ms: None,
+        })
+        .collect();
+    Snapshot {
+        today: Default::default(),
+        status: Status {
+            daemon_version: "test".into(),
+            pid: 0,
+            mode: Mode::Enforce,
+            tick: 0,
+            sampled_at_ms: 0,
+            tick_interval_ms: 1000,
+            tick_cpu_ns: 0,
+            tick_wall_ns: 0,
+            sample_discarded: false,
+            process_count: processes.len(),
+            pressure_level: Default::default(),
+            batch_running: false,
+            cleanup_pending: Vec::new(),
+            last_error: None,
+        },
+        boot_id: "test".into(),
+        capabilities,
+        processes,
+        changes: ProcessChanges::default(),
+        pressure: Some(pressure),
+        attribution: AttributionSnapshot {
+            owners: Vec::new(),
+            agents: Vec::new(),
+            workloads,
+            processes: attribution_processes,
+        },
+        frozen: Vec::new(),
+        held: Vec::new(),
+        guardian: None,
+    }
+}
+/// Drives the real `Guardian::tick` against `identity` with synthetic heavy-CPU pressure until
+/// it throttles for real: writes the real `state/throttled.json` journal (Enforce mode) and sets
+/// the real `EXT_DARWINBG` policy via `platform.set_backgrounded`, exactly as the live daemon
+/// would. Returns the live `Guardian`/`Attributor`/`RotatingLog` so a caller that wants to keep
+/// driving ticks (e.g. to release again) can; a caller that only wants the on-disk journal and
+/// real OS state -- simulating a crash right after throttling -- can just drop the tuple.
+#[cfg(target_os = "macos")]
+fn throttle_owned_via_guardian(
+    home: &Path,
+    identity: ProcessIdentity,
+    platform: &mut NativePlatform,
+) -> (Guardian, Attributor, RotatingLog) {
+    let paths = Paths {
+        base: home.to_path_buf(),
+    };
+    paths.prepare().expect("prepare paths");
+    let mut guardian = Guardian::new(
+        paths,
+        platform.boot_id().expect("boot_id"),
+        Mode::Enforce,
+        GuardianThresholds::default(),
+    );
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = RotatingLog::open(home.join("log/decisions.jsonl"), &Config::default())
+        .expect("open decisions log");
+    let now = Instant::now();
+    for n in 0..=2u64 {
+        let snapshot = throttle_snapshot(
+            platform.capabilities(),
+            heavy_cpu(n),
+            Some(identity),
+            n * 500_000_000,
+        );
+        guardian
+            .tick(
+                now + Duration::from_secs(n),
+                &snapshot,
+                platform,
+                &mut attributor,
+                &mut log,
+            )
+            .expect("guardian tick");
+    }
+    assert_eq!(
+        guardian.throttle.view.workloads.len(),
+        1,
+        "the owned process must have been throttled via the real core path"
+    );
+    (guardian, attributor, log)
 }
 
 fn process_state(pid: i32) -> Option<char> {
@@ -534,6 +747,110 @@ fn cli_offline_resume_recovers_directly_when_no_daemon_is_reachable() {
     daemon.kill();
     assert!(run_cli(&home.path, &["resume", "--all"]).status.success());
     wait_resumed(bare.pid());
+}
+
+/// The real platform layer (`NativePlatform::set_backgrounded`/`backgrounded`) plus the real
+/// core `Guardian` policy, both driven against one real owned process: a set/clear round trip, a
+/// stale-identity rejection, then a full throttle-via-pressure-then-release cycle through
+/// `Guardian::tick` (not a bare `Controller`), verified against the real `EXT_DARWINBG` flag.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_platform_and_guardian_own_process_identity_and_throttle_round_trip() {
+    let mut platform = NativePlatform::new().expect("NativePlatform::new");
+    let owned = BareSleep::spawn();
+    let identity = identity_of(owned.pid());
+
+    // Force a known baseline first rather than assuming a freshly spawned process starts
+    // un-backgrounded: it could inherit the test harness's own policy.
+    platform.set_backgrounded(identity, false).unwrap();
+    assert!(!platform.backgrounded(identity).unwrap());
+    platform.set_backgrounded(identity, true).unwrap();
+    assert!(platform.backgrounded(identity).unwrap());
+    platform.set_backgrounded(identity, false).unwrap();
+    assert!(
+        !platform.backgrounded(identity).unwrap(),
+        "clearing must fully restore the un-backgrounded state"
+    );
+
+    // A stale identity (same pid, wrong start_time) must be rejected, never actioned.
+    let stale = ProcessIdentity {
+        pid: identity.pid,
+        start_time: identity.start_time.wrapping_add(1),
+    };
+    let err = platform.set_backgrounded(stale, true).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::NotFound,
+        "a mismatched identity must be rejected"
+    );
+    assert!(
+        !platform.backgrounded(identity).unwrap(),
+        "a rejected mismatch must never leak through to the real process"
+    );
+
+    let home = TempHome::new_throttle_only("native-guardian");
+    let (mut guardian, mut attributor, mut log) =
+        throttle_owned_via_guardian(&home.path, identity, &mut platform);
+    assert!(
+        platform.backgrounded(identity).unwrap(),
+        "Guardian must have set the real OS background policy"
+    );
+
+    let quiet = throttle_snapshot(platform.capabilities(), quiet_cpu(), None, 0);
+    guardian
+        .tick(
+            Instant::now() + Duration::from_secs(10),
+            &quiet,
+            &mut platform,
+            &mut attributor,
+            &mut log,
+        )
+        .expect("guardian tick");
+    assert!(guardian.throttle.view.workloads.is_empty());
+    assert!(
+        !platform.backgrounded(identity).unwrap(),
+        "release must clear the real OS background policy"
+    );
+}
+
+/// The throttle journal's own offline-recovery path (`throttle::recover`, called first inside
+/// `guardian::recovery::recover`): a real, offline `ballast resume --all` must clear a real
+/// process's `EXT_DARWINBG` background policy, exactly like `cli_offline_resume_recovers_...`
+/// above proves for a frozen (SIGSTOP'd) workload -- the two journals are recovered by the same
+/// CLI call but through independent code paths, so this needs its own real-binary proof.
+#[cfg(target_os = "macos")]
+#[test]
+fn cli_offline_resume_recovers_a_throttled_process_without_a_reachable_daemon() {
+    let home = TempHome::new_throttle_only("cli-throttle");
+    let owned = BareSleep::spawn();
+    let identity = identity_of(owned.pid());
+    let mut platform = NativePlatform::new().expect("NativePlatform::new");
+
+    // Throttle it for real via the core Guardian path (writes the real journal, sets the real
+    // EXT_DARWINBG policy), then drop the in-process Guardian/log without releasing -- simulating
+    // a crash right after throttling, not a hand-written journal.
+    drop(throttle_owned_via_guardian(
+        &home.path,
+        identity,
+        &mut platform,
+    ));
+
+    let output = run_cli(&home.path, &["resume", "--all"]);
+    assert!(
+        output.status.success(),
+        "offline `ballast resume --all` must recover a throttled process with no daemon running: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !platform.backgrounded(identity).unwrap(),
+        "the real background policy must be cleared by offline recovery"
+    );
+    assert!(
+        home.read_throttled_json()["workloads"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a fully recovered throttle journal must be rewritten empty, not left with stale entries"
+    );
 }
 
 #[test]

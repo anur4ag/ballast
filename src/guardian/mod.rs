@@ -1,6 +1,7 @@
 pub mod recovery;
 #[cfg(test)]
 mod tests;
+pub mod throttle;
 
 use crate::attribution::{AttributionSnapshot, Attributor, ProcessRole, Workload, WorkloadClass};
 use crate::daemon::{
@@ -246,6 +247,8 @@ impl PressureState {
 /// Current policy explanation and the exact pressure rates used by the guardian.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GuardianNote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<throttle::View>,
     pub kind: String,
     pub message: String,
     pub sampled_at_ms: u64,
@@ -280,6 +283,7 @@ impl FrozenWorkload {
 }
 
 pub struct Guardian {
+    pub throttle: throttle::Controller,
     pub level: Level,
     pub frozen: Vec<FrozenWorkload>,
     pub note: GuardianNote,
@@ -304,6 +308,13 @@ pub struct Guardian {
 impl Guardian {
     pub fn new(paths: Paths, boot_id: String, mode: Mode, thresholds: Thresholds) -> Self {
         Self {
+            throttle: throttle::Controller::new(
+                paths.clone(),
+                boot_id.clone(),
+                mode,
+                true,
+                throttle::Thresholds::default(),
+            ),
             level: Level::Normal,
             frozen: Vec::new(),
             note: GuardianNote::default(),
@@ -341,6 +352,7 @@ impl Guardian {
         self.frozen
             .iter()
             .flat_map(|w| w.processes.iter().copied())
+            .chain(self.throttle.watched())
             .collect()
     }
     fn running_workloads<'a>(
@@ -370,6 +382,25 @@ impl Guardian {
             .any(|w| w.class == WorkloadClass::Batch && running.contains(w.id.as_str()))
     }
     pub fn tick(
+        &mut self,
+        now: Instant,
+        snapshot: &Snapshot,
+        platform: &mut impl Platform,
+        attributor: &mut Attributor,
+        log: &mut RotatingLog,
+    ) -> io::Result<()> {
+        let memory = self.memory_tick(now, snapshot, platform, attributor, log);
+        let throttle = self.throttle.tick(now, snapshot, platform, log);
+        self.note.throttle = platform
+            .supports_throttle()
+            .then(|| self.throttle.view.clone());
+        if let Err(error) = throttle {
+            self.errors.push(format!("throttle: {error}"));
+        }
+        memory
+    }
+
+    fn memory_tick(
         &mut self,
         now: Instant,
         snapshot: &Snapshot,
@@ -740,7 +771,13 @@ impl Guardian {
         let target = target
             .map(|target| {
                 crate::attribution::WorkloadHandles::new(
-                    self.frozen.iter().map(|w| w.workload_id.as_str()),
+                    self.frozen.iter().map(|w| w.workload_id.as_str()).chain(
+                        self.throttle
+                            .view
+                            .workloads
+                            .iter()
+                            .map(|w| w.workload_id.as_str()),
+                    ),
                 )
                 .resolve(target)
             })
@@ -751,7 +788,15 @@ impl Guardian {
             .filter(|w| target.as_deref().is_none_or(|id| w.workload_id == id))
             .map(|w| w.workload_id.clone())
             .collect();
-        if target.is_some() && ids.is_empty() {
+        if target.is_some()
+            && ids.is_empty()
+            && !self
+                .throttle
+                .view
+                .workloads
+                .iter()
+                .any(|w| target.as_deref() == Some(w.workload_id.as_str()))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "frozen workload not found",
