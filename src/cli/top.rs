@@ -118,7 +118,7 @@ pub fn run() -> io::Result<()> {
                     client = None;
                     if crate::guardian::recovery::needs_recovery(&paths) {
                         result = Err(io::Error::other(
-                            "frozen work remains; run ballast resume --all",
+                            "frozen or throttled work remains; run ballast resume --all",
                         ));
                     }
                 }
@@ -329,6 +329,19 @@ fn view(snapshot: Option<&Snapshot>, cpu: &Cpu, error: Option<&str>, width: u16,
             s.held.len()
         )),
     ])];
+    if let Some(t) = s.guardian.as_ref().and_then(|n| n.throttle.as_ref()) {
+        header.push(Line::from(format!(
+            "CPU {:?} · I/O {:?} · {} {}",
+            t.cpu_level,
+            t.io_level,
+            t.workloads.len(),
+            if matches!(s.status.mode, crate::daemon::files::Mode::Observe) {
+                "would throttle"
+            } else {
+                "throttled"
+            }
+        )));
+    }
     let p = s.pressure.as_ref();
     let mem = meter(
         "MEM",
@@ -743,6 +756,17 @@ fn lines(s: &Snapshot, cpu: &Cpu, width: u16, now: u64) -> Vec<Line<'static>> {
             let frozen = s.frozen.iter().any(|f| f.workload_id == w.id);
             let state = if frozen {
                 if observe { "SIMULATED" } else { "FROZEN" }
+            } else if s
+                .guardian
+                .as_ref()
+                .and_then(|n| n.throttle.as_ref())
+                .is_some_and(|t| t.workloads.iter().any(|t| t.workload_id == w.id))
+            {
+                if observe {
+                    "WOULD THROTTLE"
+                } else {
+                    "THROTTLED"
+                }
             } else {
                 "running"
             };

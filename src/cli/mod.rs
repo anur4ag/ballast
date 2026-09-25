@@ -87,6 +87,14 @@ fn summary(snapshot: &Snapshot) -> Vec<String> {
         },
         snapshot.held.len()
     )];
+    if let Some(t) = snapshot.guardian.as_ref().and_then(|n| n.throttle.as_ref()) {
+        lines.push(format!(
+            "CPU: {:?} | I/O: {:?} | {} throttled workloads",
+            t.cpu_level,
+            t.io_level,
+            t.workloads.len()
+        ));
+    }
     if let Some(p) = &snapshot.pressure {
         lines.push(format!(
             "Memory: {} / {} | swap: {}",

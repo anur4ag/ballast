@@ -184,6 +184,13 @@ fn run_with_targets(
         config.mode,
         config.pressure.clone(),
     );
+    guardian.throttle = crate::guardian::throttle::Controller::new(
+        paths.clone(),
+        boot_id.clone(),
+        config.mode,
+        config.throttle,
+        config.throttle_pressure.clone(),
+    );
     let mut cleanup = crate::cleanup::Cleanup::new(
         config.mode,
         Duration::from_secs(config.cleanup_grace_seconds),
@@ -340,7 +347,11 @@ fn run_with_targets(
                     eprintln!("{error}; daemon log failed: {write_error}");
                 }
             }
-            observer.set_fast_polling(guardian.level != Level::Normal);
+            observer.set_fast_polling(
+                guardian.level != Level::Normal
+                    || guardian.throttle.view.cpu_level != Level::Normal
+                    || guardian.throttle.view.io_level != Level::Normal,
+            );
             next.status.tick_interval_ms = observer.interval().as_millis() as u64;
             next.status.pressure_level = guardian.level;
             next.status.batch_running = guardian.batch_running(&next.attribution, &next.processes);
@@ -416,12 +427,16 @@ fn run_with_targets(
                                     .resolve(target)
                                 })
                                 .transpose()?;
-                            guardian.resume(
+                            let now = Instant::now();
+                            let frozen =
+                                guardian.resume(target.as_deref(), now, &platform, &mut decisions);
+                            let throttled = guardian.throttle.resume(
                                 target.as_deref(),
-                                Instant::now(),
-                                &platform,
+                                now,
+                                &mut platform,
                                 &mut decisions,
-                            )
+                            );
+                            Ok::<_, io::Error>(frozen? + throttled?)
                         })() {
                             Ok(count) => {
                                 next_tick = Instant::now();
@@ -557,7 +572,7 @@ pub fn warn_if_stranded() {
             .is_err()
     {
         eprintln!(
-            "WARNING: Ballast has frozen work and the daemon is unreachable. Run `ballast resume --all` to recover it."
+            "WARNING: Ballast has frozen or throttled work and the daemon is unreachable. Run `ballast resume --all` to recover it."
         );
     }
 }
@@ -591,17 +606,42 @@ pub fn resume_command(paths: &Paths, target: Option<&str>) -> io::Result<usize> 
         );
     }
     let boot_id = platform.boot_id()?;
-    let saved = recovery::read(paths)?;
+    let saved = match recovery::read(paths) {
+        Ok(saved) => Some(saved),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
     let mut guardian = Guardian::new(
         paths.clone(),
         boot_id.clone(),
         Mode::Enforce,
         config.pressure,
     );
-    if saved.boot_id == boot_id {
+    if let Some(saved) = saved.filter(|s| s.boot_id == boot_id) {
         guardian.frozen = saved.workloads;
     }
-    let result = guardian.resume(target, Instant::now(), &platform, &mut log);
+    guardian.throttle.load_journal()?;
+    let resolved = crate::attribution::WorkloadHandles::new(
+        guardian
+            .frozen
+            .iter()
+            .map(|w| w.workload_id.as_str())
+            .chain(
+                guardian
+                    .throttle
+                    .view
+                    .workloads
+                    .iter()
+                    .map(|w| w.workload_id.as_str()),
+            ),
+    )
+    .resolve(target.unwrap())?;
+    let now = Instant::now();
+    let frozen = guardian.resume(Some(&resolved), now, &platform, &mut log);
+    let throttled = guardian
+        .throttle
+        .resume(Some(&resolved), now, &mut platform, &mut log);
+    let result = frozen.and_then(|f| throttled.map(|t| f + t));
     for error in guardian.take_errors() {
         eprintln!("guardian: {error}");
     }

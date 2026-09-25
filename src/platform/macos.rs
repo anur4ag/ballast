@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 unsafe extern "C" {
     fn ballast_listening_port(pid: i32, fd: i32) -> i32;
     fn ballast_process_cwd(pid: i32, path: *mut libc::c_char, capacity: usize) -> i32;
+    fn ballast_disk_counters(time_ns: *mut u64, bytes: *mut u64, fingerprint: *mut u64) -> i32;
     fn mach_port_deallocate(task: u32, name: u32) -> i32;
 }
 
@@ -118,6 +119,47 @@ impl NativePlatform {
 }
 
 impl Platform for NativePlatform {
+    fn supports_throttle(&self) -> bool {
+        true
+    }
+
+    fn backgrounded(&self, id: ProcessIdentity) -> io::Result<bool> {
+        let info = Self::bsd(id.pid);
+        super::validate_identity(id, info.as_ref().map(identity))?;
+        // EXT_DARWINBG is the external policy; DARWINBG is self-imposed.
+        Ok(info.unwrap().pbi_flags & 0x10000 != 0)
+    }
+
+    fn set_backgrounded(&self, id: ProcessIdentity, enabled: bool) -> io::Result<()> {
+        super::validate_identity(id, Self::bsd(id.pid).map(|info| identity(&info)))?;
+        // Like kill(2), macOS offers no atomic PID-identity policy operation.
+        if unsafe { libc::setpriority(4, id.pid as u32, if enabled { 0x1000 } else { 0 }) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if self.backgrounded(id)? != enabled {
+            return Err(io::Error::other("background policy did not change"));
+        }
+        Ok(())
+    }
+
+    fn process_io_bytes(&self, id: ProcessIdentity) -> Option<u64> {
+        if !Self::matches(id) {
+            return None;
+        }
+        let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::proc_pid_rusage(
+                id.pid,
+                libc::RUSAGE_INFO_V2,
+                (&mut usage as *mut libc::rusage_info_v2).cast(),
+            )
+        };
+        (result == 0 && Self::matches(id)).then(|| {
+            usage
+                .ri_diskio_bytesread
+                .saturating_add(usage.ri_diskio_byteswritten)
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             environment: true,
@@ -315,6 +357,16 @@ impl Platform for NativePlatform {
                 &mut count,
             )
         };
+        let mut cpu: libc::host_cpu_load_info = unsafe { std::mem::zeroed() };
+        let mut cpu_count = (size_of_val(&cpu) / size_of::<libc::integer_t>()) as u32;
+        let cpu_ok = unsafe {
+            libc::host_statistics(
+                host,
+                libc::HOST_CPU_LOAD_INFO,
+                (&mut cpu as *mut libc::host_cpu_load_info).cast(),
+                &mut cpu_count,
+            )
+        } == 0;
         #[allow(deprecated)]
         unsafe {
             mach_port_deallocate(libc::mach_task_self(), host);
@@ -328,7 +380,28 @@ impl Platform for NativePlatform {
             + u64::from(stats.compressor_page_count))
         .saturating_sub(u64::from(stats.purgeable_count));
         let swap = sysctl_value::<libc::xsw_usage>(c"vm.swapusage").ok();
+        let cores = sysctl_value::<u32>(c"hw.logicalcpu")
+            .ok()
+            .filter(|n| *n > 0);
+        let mut load = [0.0; 3];
+        let load_ok = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) } == 3;
+        let (mut io_time, mut io_bytes, mut devices) = (0, 0, 0);
+        let io_ok =
+            unsafe { ballast_disk_counters(&mut io_time, &mut io_bytes, &mut devices) } == 0;
+        let throttle = cores.filter(|_| cpu_ok && load_ok).map(|cores| {
+            let ticks = cpu.cpu_ticks.map(u64::from);
+            crate::guardian::throttle::Inputs {
+                cpu_busy_ticks: ticks[0] + ticks[1] + ticks[3],
+                cpu_total_ticks: ticks.iter().sum(),
+                cpu_count: cores,
+                load_per_core: load[0] / f64::from(cores),
+                io_time_ns: io_ok.then_some(io_time),
+                io_bytes: io_ok.then_some(io_bytes),
+                io_devices: devices,
+            }
+        });
         Ok(PressureInputs {
+            throttle,
             page_size: self.page_size,
             total_memory_bytes: total,
             used_memory_bytes: Some(used_pages.saturating_mul(self.page_size)),

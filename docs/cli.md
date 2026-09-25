@@ -166,6 +166,7 @@ Daily and combined totals each have `enforce` and `observe` objects with these f
 | --- | --- |
 | `observed_ms`, `elevated_ms`, `critical_ms` | Valid sampled pressure time in milliseconds; unknown intervals, backward clocks and gaps over five seconds are excluded |
 | `freezes_by_agent_kind` | Map from agent kind to freeze aggregates below |
+| `throttled_workload_ms` | Sum of macOS throttled workload milliseconds; overlapping workloads add separately, with no extrapolation across gaps over five seconds |
 | `holds` | Heavy command holds, or observe proposals |
 | `hold_wait_seconds` | Sparse frequency map with integer-second string keys `0` through `300`; completed and cancelled waits are rounded down, capped at 300 |
 | `timed_out_holds`, `cancelled_holds` | Completed holds released at the five-minute cap, and disconnected holds |
@@ -280,3 +281,17 @@ An invalid environment emits the same `invalid` result envelope as install and u
 
 Use the JSON `status` to distinguish `no_change` from CLI argument errors, which produce no result object.
 See [Install with an agent](install-with-an-agent.md) for the full consent workflow.
+
+### macOS throttle state
+
+`guardian.throttle`, when present, contains `cpu_level`, `io_level`, `cpu_busy_fraction`, `io_busy_fraction`, `agent_cpu_share`, `agent_io_share`, and `workloads`.
+The levels are `normal` or `elevated`; fractional measurements are null while unknown.
+Each workload records `workload_id`, `root`, owned `processes`, and `preserved` identities whose external background policy predates Ballast.
+`pressure.throttle` holds raw host CPU tick, core/load, and candidate I/O counters.
+Linux omits these optional fields.
+
+`top` marks `THROTTLED` workloads, or `WOULD THROTTLE` in observe mode, and shows both resource levels.
+`status` text shows resource levels and throttle count.
+`report` displays workload-seconds with separate enforce and observe accounting.
+Decision events include `throttle`, `unthrottle`, and `throttle_pressure_transition` with measured evidence.
+`resume --all` restores throttles as well as freezes, including when the daemon is unavailable.

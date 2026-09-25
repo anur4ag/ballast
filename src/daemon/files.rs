@@ -72,6 +72,8 @@ pub enum Mode {
 pub struct Config {
     pub mode: Mode,
     pub notifications: bool,
+    pub throttle: bool,
+    pub throttle_pressure: crate::guardian::throttle::Thresholds,
     pub cleanup_grace_seconds: u64,
     pub pressure: crate::guardian::Thresholds,
     pub markers: Vec<crate::attribution::Marker>,
@@ -86,6 +88,8 @@ impl Default for Config {
         Self {
             mode: Mode::Enforce,
             notifications: true,
+            throttle: true,
+            throttle_pressure: crate::guardian::throttle::Thresholds::default(),
             cleanup_grace_seconds: 30,
             pressure: crate::guardian::Thresholds::default(),
             markers: Vec::new(),
@@ -106,7 +110,7 @@ impl Config {
         };
         let config: Self = toml::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("config.toml: {e}")))?;
-        if !config.pressure.valid() {
+        if !config.pressure.valid() || !config.throttle_pressure.valid() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "pressure thresholds must be finite, positive, ordered, and PSI percentages at most 100",
@@ -217,7 +221,9 @@ impl RotatingLog {
         }))?);
         if matches!(
             event,
-            "freeze"
+            "throttle"
+                | "unthrottle"
+                | "freeze"
                 | "resume"
                 | "hold"
                 | "hold_completed"

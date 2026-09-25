@@ -26,3 +26,9 @@ A successful notification submission does not prove visible desktop delivery.
 For isolated environments, use absolute `HOME`, `BALLAST_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `BALLAST_SERVICE_DIR`, and a unique `BALLAST_SERVICE_LABEL`.
 Linux also respects `XDG_CONFIG_HOME`.
 Keep the Ballast home short enough for a Unix socket path (under 104 bytes on macOS and 108 on Linux, including `/run/ballastd.sock`).
+
+CPU and I/O throttling is supported on macOS through reversible external DARWIN_BG policy.
+Foreground improvements and the I/O trigger remain subject to calibration.
+`ballast doctor` reports throttling unsupported on Linux in v0.1.
+Migrating a running Linux workload to a transient scope changes its original unit lifetime, and unprivileged nice cannot be restored with the default limit.
+Linux CPU/I/O pressure does not trigger a Ballast action.

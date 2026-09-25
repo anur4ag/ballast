@@ -53,6 +53,13 @@ impl WorkloadHandles {
                 .chain(snapshot.frozen.iter().map(|w| w.workload_id.as_str()))
                 .chain(
                     snapshot
+                        .guardian
+                        .iter()
+                        .filter_map(|n| n.throttle.as_ref())
+                        .flat_map(|t| t.workloads.iter().map(|w| w.workload_id.as_str())),
+                )
+                .chain(
+                    snapshot
                         .status
                         .cleanup_pending
                         .iter()

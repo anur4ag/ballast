@@ -456,7 +456,7 @@ impl Installation {
                     };
                     if !installing && recovery::needs_recovery(&self.paths) {
                         return Err(io::Error::other(
-                            "frozen work remains; run `ballast resume --all` before uninstalling",
+                            "frozen or throttled work remains; run `ballast resume --all` before uninstalling",
                         ));
                     }
                     for file in &item.files {

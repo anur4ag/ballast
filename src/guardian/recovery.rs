@@ -15,7 +15,15 @@ pub struct FrozenState {
 }
 
 pub fn write(paths: &Paths, boot_id: &str, workloads: &[FrozenWorkload]) -> io::Result<()> {
-    let temporary = paths.base.join("state/frozen.json.tmp");
+    write_json(
+        paths,
+        "frozen",
+        &serde_json::json!({"boot_id": boot_id, "workloads": workloads}),
+    )
+}
+
+pub(super) fn write_json(paths: &Paths, name: &str, value: &impl Serialize) -> io::Result<()> {
+    let temporary = paths.base.join(format!("state/{name}.json.tmp"));
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -24,17 +32,12 @@ pub fn write(paths: &Paths, boot_id: &str, workloads: &[FrozenWorkload]) -> io::
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&temporary)?;
     if !file.metadata()?.is_file() {
-        return Err(io::Error::other("frozen journal must be a regular file"));
+        return Err(io::Error::other("journal must be a regular file"));
     }
-    serde_json::to_writer(
-        &mut file,
-        &serde_json::json!({
-            "boot_id": boot_id, "workloads": workloads,
-        }),
-    )?;
+    serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
-    fs::rename(temporary, paths.base.join("state/frozen.json"))?;
+    fs::rename(temporary, paths.base.join(format!("state/{name}.json")))?;
     File::open(paths.base.join("state"))?.sync_all()
 }
 
@@ -45,10 +48,11 @@ pub fn read(paths: &Paths) -> io::Result<FrozenState> {
 }
 
 pub fn needs_recovery(paths: &Paths) -> bool {
-    match read(paths) {
-        Ok(state) => !state.workloads.is_empty(),
-        Err(_) => fs::metadata(paths.base.join("state/frozen.json")).is_ok_and(|m| m.len() > 0),
-    }
+    super::throttle::needs_recovery(paths)
+        || match read(paths) {
+            Ok(state) => !state.workloads.is_empty(),
+            Err(_) => fs::metadata(paths.base.join("state/frozen.json")).is_ok_and(|m| m.len() > 0),
+        }
 }
 
 pub(super) fn signal(
@@ -74,8 +78,9 @@ pub fn recover(
     log: &mut RotatingLog,
 ) -> io::Result<usize> {
     let boot_id = platform.boot_id()?;
-    let mut resumed = 0;
-    let mut failure = None;
+    let throttle_result = super::throttle::recover(paths, platform, log);
+    let mut resumed = throttle_result.as_ref().copied().unwrap_or(0);
+    let mut failure = throttle_result.err();
     let mut remaining = Vec::new();
     let saved = match read(paths) {
         Ok(state) if state.boot_id == boot_id => state.workloads,

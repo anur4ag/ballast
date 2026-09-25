@@ -81,6 +81,8 @@ pub struct PressureInputs {
     pub psi_some_total_us: Option<u64>,
     #[serde(default)]
     pub psi_full_total_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<crate::guardian::throttle::Inputs>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -102,6 +104,24 @@ impl Signal {
 }
 
 pub trait Platform {
+    fn supports_throttle(&self) -> bool {
+        false
+    }
+    fn backgrounded(&self, _id: ProcessIdentity) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "throttling unavailable",
+        ))
+    }
+    fn set_backgrounded(&self, _id: ProcessIdentity, _enabled: bool) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "throttling unavailable",
+        ))
+    }
+    fn process_io_bytes(&self, _id: ProcessIdentity) -> Option<u64> {
+        None
+    }
     fn capabilities(&self) -> Capabilities;
     /// Persist alongside process identities; discard saved entries from a different boot.
     fn boot_id(&self) -> io::Result<String>;

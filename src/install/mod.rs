@@ -350,6 +350,14 @@ impl Installation {
                 )
             },
         );
+        check(
+            "throttling",
+            Ok(if cfg!(target_os = "macos") {
+                "macOS DARWIN_BG: reversible CPU and I/O background policy"
+            } else {
+                "not supported on Linux in v0.1"
+            }),
+        );
         let reachable = self.reachable();
         check(
             "daemon",
@@ -360,9 +368,9 @@ impl Installation {
             },
         );
         check(
-            "frozen work",
+            "frozen or throttled work",
             if !reachable && recovery::needs_recovery(&self.paths) {
-                Err("daemon unreachable with frozen work; run `ballast resume --all` now".into())
+                Err("daemon unreachable with frozen or throttled work; run `ballast resume --all` now".into())
             } else {
                 Ok("no stranded journal entries")
             },

@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!(
                 "Resumed {}.",
-                ballast::cli::count(count, "frozen entry", "frozen entries")
+                ballast::cli::count(count, "work entry", "work entries")
             );
         }
         Command::Gc => ballast::cleanup::command(None)?,

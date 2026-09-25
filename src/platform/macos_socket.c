@@ -24,3 +24,44 @@ int ballast_process_cwd(int pid, char *path, size_t capacity) {
     path[length] = 0;
     return 0;
 }
+
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+
+/* Aggregate driver counters; the registry fingerprint detects device changes. */
+int ballast_disk_counters(uint64_t *time_ns, uint64_t *bytes, uint64_t *fingerprint) {
+    io_iterator_t iterator;
+    if (IOServiceGetMatchingServices(MACH_PORT_NULL,
+            IOServiceMatching("IOBlockStorageDriver"), &iterator) != KERN_SUCCESS) return -1;
+    *time_ns = *bytes = *fingerprint = 0;
+    int found = 0;
+    io_object_t device;
+    while ((device = IOIteratorNext(iterator))) {
+        CFTypeRef stats = IORegistryEntryCreateCFProperty(device, CFSTR("Statistics"),
+                                                         kCFAllocatorDefault, 0);
+        uint64_t id = 0;
+        if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID() &&
+                IORegistryEntryGetRegistryEntryID(device, &id) == KERN_SUCCESS) {
+            CFStringRef keys[] = { CFSTR("Total Time (Read)"), CFSTR("Total Time (Write)"),
+                                   CFSTR("Bytes (Read)"), CFSTR("Bytes (Write)") };
+            int64_t values[4] = {0};
+            int valid = 1;
+            for (int i = 0; i < 4; i++) {
+                CFTypeRef value = CFDictionaryGetValue(stats, keys[i]);
+                if (!value || CFGetTypeID(value) != CFNumberGetTypeID() ||
+                    !CFNumberGetValue(value, kCFNumberSInt64Type, &values[i]) || values[i] < 0)
+                    valid = 0;
+            }
+            if (valid) {
+                *time_ns += (uint64_t)values[0] + (uint64_t)values[1];
+                *bytes += (uint64_t)values[2] + (uint64_t)values[3];
+                *fingerprint ^= id;
+                found++;
+            }
+        }
+        if (stats) CFRelease(stats);
+        IOObjectRelease(device);
+    }
+    IOObjectRelease(iterator);
+    return found ? 0 : -1;
+}

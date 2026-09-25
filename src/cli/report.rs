@@ -88,6 +88,13 @@ pub(super) fn format(report: &Report) -> String {
                 "Freezes"
             }
         ));
+        if t.throttled_workload_ms > 0 {
+            out.push_str(&format!(
+                "  {}throttled workload-seconds: {:.1}\n",
+                if observe { "Simulated " } else { "" },
+                t.throttled_workload_ms as f64 / 1000.0
+            ));
+        }
         for (kind, f) in &t.freezes_by_agent_kind {
             let action = if observe {
                 format!("would have frozen {} workloads", f.count)
