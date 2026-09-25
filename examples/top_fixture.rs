@@ -181,6 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bytes: 0,
                 complete: true,
                 growth_30s_bytes: (i > 0).then_some(i as i64),
+                ..Default::default()
             },
         });
         snapshot.attribution.processes.push(ProcessAttribution {

@@ -73,7 +73,7 @@ The `status` object always contains the fields below.
 | `attribution` | `owners`, `agents`, `workloads`, `processes` arrays described below |
 | `frozen` | Records containing `workload_id`, `root`, `processes`, `frozen_at_ms`; a guardian freeze is for memory pressure |
 | `held` | Admission-order records containing string `agent`, `session_id`, `label`, `reason`, and integer Unix `since_ms` |
-| `guardian` | Current decision explanation or null: string `kind`, `message`, Unix `sampled_at_ms`, nullable `agent_memory_share`, `pageout_mib_per_sec`, `swapout_mib_per_sec` |
+| `guardian` | Current decision explanation or null: string `kind`, `message`, Unix `sampled_at_ms`, nullable `agent_memory_share`, `pageout_mib_per_sec`, `swapout_mib_per_sec`, `psi_some_percent`, `psi_full_percent` |
 
 A process identity is `{ "pid": integer, "start_time": integer }`.
 The start token is opaque and OS-specific.
@@ -81,7 +81,9 @@ Metrics contain integer `memory_bytes` and cumulative `cpu_time_ns`, never a per
 Environment contents are never serialized.
 `argv`, workload labels and held-command labels can contain command text; treat output as private and terminal text as untrusted.
 
-Pressure contains integer `page_size`, nullable byte counts `total_memory_bytes`, `used_memory_bytes`, `swap_used_bytes`, `swap_total_bytes`, nullable page counters `pageouts`, `swapins`, `swapouts`, nullable integer `kernel_pressure_level`, and nullable numbers `psi_some_avg10`, `psi_full_avg10`.
+Pressure contains integer `page_size`, nullable byte counts `total_memory_bytes`, `used_memory_bytes`, `swap_used_bytes`, `swap_total_bytes`, nullable page counters `pageouts`, `swapins`, `swapouts`, nullable integer `kernel_pressure_level`, nullable numbers `psi_some_avg10`, `psi_full_avg10`, and nullable cumulative stall microsecond counters `psi_some_total_us`, `psi_full_total_us`.
+Guardian PSI percentages use the sliding pressure window, falling back to avg10 before a valid counter delta exists.
+Older daemons may omit the total counters and Guardian PSI percentages; interpret them as unknown.
 Kernel values 1/2/4 mean normal/warn/critical; PSI averages are percentages.
 Guardian rates are MiB/s; agent memory share is a ratio, not a percentage, and null when the decision did not evaluate it.
 Decision kinds currently include `monitoring`, `normal`, `elevated`, `unknown_pressure`, `cooldown`, `non_agent_pressure`, `no_eligible_workload`, `last_batch_not_fastest`, `froze`, `freeze_failed`, and `resumed`.
@@ -94,7 +96,9 @@ Display the supplied message and tolerate new kinds.
 | `workloads` | String `id`, `agent_id`, `label`; identity `root`; `class` (`batch`, `service`); Unix `first_seen_ms`; nullable integer `detached_pgid`; `memory` |
 | `processes` | `identity`; nullable strings `owner_id`, `agent_id`, `workload_id`; `role` (`unattributed`, `agent_root`, `agent_internal`, `workload`); boolean `environment_known`; nullable integer-array `listening_ports`; nullable Unix `ports_sampled_at_ms` |
 
-Memory summaries contain integer `bytes`, boolean `complete`, and nullable signed `growth_30s_bytes`.
+Memory summaries contain integer `bytes`, boolean `complete`, nullable signed `growth_30s_bytes`, and nullable signed integer `growth_bytes_per_sec`.
+Guardian uses `growth_bytes_per_sec`, truncated toward zero over 2 to 30 seconds of consecutive valid samples.
+Older daemons may omit this field; interpret it as unknown.
 All times and counters are integers unless explicitly documented as ratios/rates.
 Null means unknown, not zero.
 IDs are opaque; consumers must not parse their internal punctuation or depend on array order, except for admission ordering in `held`.

@@ -9,9 +9,11 @@ use crate::daemon::{
 };
 use crate::platform::{Platform, PressureInputs, Process, ProcessIdentity, Signal};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::time::{Duration, Instant};
+
+const PRESSURE_RATE_WINDOW: Duration = Duration::from_secs(5);
 
 const COOLDOWN: Duration = Duration::from_secs(5);
 const MAX_FREEZE: Duration = Duration::from_secs(600);
@@ -65,12 +67,57 @@ impl Thresholds {
 }
 
 #[derive(Default)]
+struct RateWindow(VecDeque<(Instant, u64)>);
+impl RateWindow {
+    fn sample(&mut self, now: Instant, counter: Option<u64>) -> Option<f64> {
+        let Some(counter) = counter else {
+            self.0.clear();
+            return None;
+        };
+        if self
+            .0
+            .back()
+            .is_some_and(|&(then, old)| now <= then || counter < old)
+        {
+            self.0.clear();
+        }
+        self.0.push_back((now, counter));
+        while self
+            .0
+            .get(1)
+            .is_some_and(|&(then, _)| now.duration_since(then) >= PRESSURE_RATE_WINDOW)
+        {
+            self.0.pop_front();
+        }
+        let &(then, old) = self.0.front()?;
+        let elapsed = now.duration_since(then).as_secs_f64();
+        if elapsed == 0.0 {
+            return None;
+        }
+        let window = PRESSURE_RATE_WINDOW.as_secs_f64();
+        let mut delta = (counter - old) as f64;
+        if elapsed > window {
+            let &(next, next_counter) = &self.0[1];
+            delta -= (next_counter - old) as f64 * (elapsed - window)
+                / next.duration_since(then).as_secs_f64();
+        }
+        Some(delta / elapsed.min(window))
+    }
+}
+
+#[derive(Default)]
 struct PressureState {
     valid: bool,
     level: Level,
     higher: Option<Level>,
     below_since: Option<Instant>,
-    previous: Option<(Instant, PressureInputs)>,
+    page_size: u64,
+    pageouts: RateWindow,
+    swapouts: RateWindow,
+    psi_some: RateWindow,
+    psi_full: RateWindow,
+    psi_some_percent: Option<f64>,
+    psi_full_percent: Option<f64>,
     pageout_mib_per_sec: Option<f64>,
     swapout_mib_per_sec: Option<f64>,
 }
@@ -80,35 +127,52 @@ impl PressureState {
         now: Instant,
         input: Option<&PressureInputs>,
         thresholds: &Thresholds,
+        macos: bool,
     ) -> Level {
         self.valid = false;
         self.pageout_mib_per_sec = None;
         self.swapout_mib_per_sec = None;
+        self.psi_some_percent = None;
+        self.psi_full_percent = None;
         let Some(input) = input else {
-            self.previous = None;
+            self.psi_some.0.clear();
+            self.psi_full.0.clear();
+            self.pageouts.0.clear();
+            self.swapouts.0.clear();
             self.higher = None;
             self.below_since = None;
             return self.level;
         };
-        if let Some((then, previous)) = &self.previous {
-            let elapsed = now.saturating_duration_since(*then).as_secs_f64();
-            if elapsed > 0.0 && input.page_size == previous.page_size {
-                let rate = |current: Option<u64>, old: Option<u64>| {
-                    Some(
-                        current?.checked_sub(old?)? as f64 * input.page_size as f64
-                            / 1048576.0
-                            / elapsed,
-                    )
-                };
-                self.pageout_mib_per_sec = rate(input.pageouts, previous.pageouts);
-                self.swapout_mib_per_sec = rate(input.swapouts, previous.swapouts);
-            }
+        if !macos || input.page_size != self.page_size {
+            self.pageouts.0.clear();
+            self.swapouts.0.clear();
         }
-        self.previous = Some((now, input.clone()));
-        let psi_known = [input.psi_some_avg10, input.psi_full_avg10]
-            .iter()
-            .flatten()
-            .any(|v| v.is_finite() && (0.0..=100.0).contains(v));
+        self.page_size = input.page_size;
+        if macos {
+            let mib_per_page = input.page_size as f64 / 1048576.0;
+            self.pageout_mib_per_sec = self
+                .pageouts
+                .sample(now, input.pageouts)
+                .map(|rate| rate * mib_per_page);
+            self.swapout_mib_per_sec = self
+                .swapouts
+                .sample(now, input.swapouts)
+                .map(|rate| rate * mib_per_page);
+        } else {
+            let percent = |rate: Option<f64>, avg10: Option<f64>| {
+                rate.map(|us_per_sec| (us_per_sec / 10_000.0).clamp(0.0, 100.0))
+                    .or(avg10.filter(|v| v.is_finite() && (0.0..=100.0).contains(v)))
+            };
+            self.psi_some_percent = percent(
+                self.psi_some.sample(now, input.psi_some_total_us),
+                input.psi_some_avg10,
+            );
+            self.psi_full_percent = percent(
+                self.psi_full.sample(now, input.psi_full_total_us),
+                input.psi_full_avg10,
+            );
+        }
+        let psi_known = self.psi_some_percent.is_some() || self.psi_full_percent.is_some();
         if !matches!(input.kernel_pressure_level, Some(1 | 2 | 4))
             && !psi_known
             && self.pageout_mib_per_sec.is_none()
@@ -123,11 +187,11 @@ impl PressureState {
             || self
                 .swapout_mib_per_sec
                 .is_some_and(|v| v > thresholds.macos_critical_mib_per_sec)
-            || input
-                .psi_some_avg10
+            || self
+                .psi_some_percent
                 .is_some_and(|v| v > thresholds.linux_critical_some)
-            || input
-                .psi_full_avg10
+            || self
+                .psi_full_percent
                 .is_some_and(|v| v > thresholds.linux_critical_full)
         {
             Level::Critical
@@ -136,15 +200,19 @@ impl PressureState {
                 .pageout_mib_per_sec
                 .zip(self.swapout_mib_per_sec)
                 .is_some_and(|(p, s)| p + s > thresholds.macos_elevated_mib_per_sec)
-            || input
-                .psi_some_avg10
+            || self
+                .psi_some_percent
                 .is_some_and(|v| v > thresholds.linux_elevated_some)
         {
             Level::Elevated
         } else {
             Level::Normal
         };
-        if level > self.level {
+        if macos && input.kernel_pressure_level == Some(4) {
+            self.level = Level::Critical;
+            self.higher = None;
+            self.below_since = None;
+        } else if level > self.level {
             self.below_since = None;
             if self.higher == Some(level) {
                 self.level = level;
@@ -181,6 +249,10 @@ pub struct GuardianNote {
     pub agent_memory_share: Option<f64>,
     pub pageout_mib_per_sec: Option<f64>,
     pub swapout_mib_per_sec: Option<f64>,
+    #[serde(default)]
+    pub psi_some_percent: Option<f64>,
+    #[serde(default)]
+    pub psi_full_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -312,9 +384,12 @@ impl Guardian {
             }
         }
         let previous = self.level;
-        self.level = self
-            .pressure
-            .sample(now, snapshot.pressure.as_ref(), &self.thresholds);
+        self.level = self.pressure.sample(
+            now,
+            snapshot.pressure.as_ref(),
+            &self.thresholds,
+            snapshot.capabilities.kernel_pressure,
+        );
         let pressure_unknown = if self.pressure.valid {
             self.invalid_since = None;
             false
@@ -332,6 +407,8 @@ impl Guardian {
             sampled_at_ms: snapshot.status.sampled_at_ms,
             pageout_mib_per_sec: self.pressure.pageout_mib_per_sec,
             swapout_mib_per_sec: self.pressure.swapout_mib_per_sec,
+            psi_some_percent: self.pressure.psi_some_percent,
+            psi_full_percent: self.pressure.psi_full_percent,
             ..GuardianNote::default()
         };
         let workloads: Vec<_> = snapshot.attribution.workloads.iter().map(|w| serde_json::json!({
@@ -339,7 +416,8 @@ impl Guardian {
         })).collect();
         self.evidence = serde_json::json!({"sampled_at_ms": snapshot.status.sampled_at_ms,
             "pressure": snapshot.pressure, "pageout_mib_per_sec": self.pressure.pageout_mib_per_sec,
-            "swapout_mib_per_sec": self.pressure.swapout_mib_per_sec, "workloads": workloads,
+            "swapout_mib_per_sec": self.pressure.swapout_mib_per_sec,
+            "psi_some_percent": self.pressure.psi_some_percent, "psi_full_percent": self.pressure.psi_full_percent, "workloads": workloads,
             "agent_memory_bytes": snapshot.attribution.agents.iter().map(|a| a.memory.bytes).fold(0u64, u64::saturating_add)});
         if self.level != previous {
             self.record(
@@ -441,7 +519,7 @@ impl Guardian {
         let Some(victim) = candidates.iter().copied().max_by_key(|w| {
             (
                 w.class == WorkloadClass::Batch,
-                w.memory.growth_30s_bytes,
+                w.memory.growth_bytes_per_sec,
                 w.first_seen_ms,
                 &w.id,
             )
@@ -456,10 +534,13 @@ impl Guardian {
             .count();
         if victim.class == WorkloadClass::Batch
             && batches == 1
-            && (victim.memory.growth_30s_bytes.is_none()
+            && (victim
+                .memory
+                .growth_bytes_per_sec
+                .is_none_or(|rate| rate <= 0)
                 || candidates.iter().any(|w| {
-                    w.memory.growth_30s_bytes.is_none()
-                        || w.memory.growth_30s_bytes > victim.memory.growth_30s_bytes
+                    w.memory.growth_bytes_per_sec.is_none()
+                        || w.memory.growth_bytes_per_sec > victim.memory.growth_bytes_per_sec
                 }))
         {
             return self.stand_down("last_batch_not_fastest", log);

@@ -1443,7 +1443,17 @@ fn growth_over_30s_requires_an_unbroken_run_of_valid_samples() {
     let mut attributor = Attributor::new(Vec::new(), Vec::new());
     let now = Instant::now();
 
-    for (offset_secs, memory) in [(0u64, 100u64), (10, 150), (20, 200), (30, 260)] {
+    for (offset_secs, memory, rate, growth) in [
+        (0u64, 100u64, None, None),
+        (1, 110, None, None),
+        (2, 120, Some(10), None),
+        (10, 200, Some(10), None),
+        (20, 300, Some(10), None),
+        (30, 400, Some(10), Some(300)),
+        (35, 500, Some(11), Some(380)),
+        (40, 200, Some(0), Some(0)),
+        (41, 100, Some(-3), Some(-100)),
+    ] {
         let platform = FakePlatform::default()
             .env(root, &env)
             .metrics(root, memory);
@@ -1461,14 +1471,8 @@ fn growth_over_30s_requires_an_unbroken_run_of_valid_samples() {
             agent.memory.complete,
             "metrics were supplied every tick, so this tick's own reading is complete"
         );
-        if offset_secs < 30 {
-            assert_eq!(
-                agent.memory.growth_30s_bytes, None,
-                "growth must stay None until a full unbroken 30s of samples has accumulated, at +{offset_secs}s"
-            );
-        } else {
-            assert_eq!(agent.memory.growth_30s_bytes, Some(260 - 100));
-        }
+        assert_eq!(agent.memory.growth_30s_bytes, growth);
+        assert_eq!(agent.memory.growth_bytes_per_sec, rate, "at {offset_secs}s");
     }
 }
 
@@ -1511,6 +1515,7 @@ fn unknown_metrics_reset_growth_and_completeness() {
         "a tick with unknown metrics must reset the growth window's completeness"
     );
     assert_eq!(agent.memory.growth_30s_bytes, None);
+    assert_eq!(agent.memory.growth_bytes_per_sec, None);
 }
 
 #[test]
@@ -1535,6 +1540,13 @@ fn a_discarded_tick_resets_the_growth_baseline() {
             offset_secs * 1000,
             discard,
         );
+        let agent_id = attr(&snapshot, root).agent_id.clone().unwrap();
+        let memory = &agent_of(&snapshot, &agent_id).memory;
+        if (15..17).contains(&offset_secs) {
+            assert_eq!(memory.growth_bytes_per_sec, None);
+        } else if offset_secs >= 17 {
+            assert_eq!(memory.growth_bytes_per_sec, Some(1));
+        }
         if offset_secs == 30 {
             let agent_id = attr(&snapshot, root).agent_id.clone().unwrap();
             let agent = agent_of(&snapshot, &agent_id);
@@ -7279,7 +7291,10 @@ mod property {
     }
 
     fn memory_equal(a: &MemorySummary, b: &MemorySummary) -> bool {
-        a.bytes == b.bytes && a.complete == b.complete && a.growth_30s_bytes == b.growth_30s_bytes
+        a.bytes == b.bytes
+            && a.complete == b.complete
+            && a.growth_30s_bytes == b.growth_30s_bytes
+            && a.growth_bytes_per_sec == b.growth_bytes_per_sec
     }
     fn processes_equal(a: &ProcessAttribution, b: &ProcessAttribution) -> bool {
         a.identity == b.identity

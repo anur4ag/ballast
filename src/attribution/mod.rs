@@ -43,6 +43,7 @@ impl History {
             self.0.clear();
         }
         summary.growth_30s_bytes = None;
+        summary.growth_bytes_per_sec = None;
         if !summary.complete {
             return;
         }
@@ -53,6 +54,17 @@ impl History {
             self.0.pop_front();
         }
         if let Some(&(then, bytes)) = self.0.front() {
+            let elapsed = now.duration_since(then).as_secs_f64();
+            if elapsed >= 2.0 {
+                let mut delta = (i128::from(summary.bytes) - i128::from(bytes)) as f64;
+                if elapsed > 30.0 {
+                    let &(next, next_bytes) = &self.0[1];
+                    // Interpolate the cutoff so unequal tick intervals still span at most 30 s.
+                    delta -= (i128::from(next_bytes) - i128::from(bytes)) as f64 * (elapsed - 30.0)
+                        / next.duration_since(then).as_secs_f64();
+                }
+                summary.growth_bytes_per_sec = Some((delta / elapsed.min(30.0)) as i64);
+            }
             if now.duration_since(then) >= Duration::from_secs(30) {
                 summary.growth_30s_bytes = Some(
                     (i128::from(summary.bytes) - i128::from(bytes))

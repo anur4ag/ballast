@@ -51,6 +51,7 @@ struct FakePlatform {
     /// Returned by `list_processes`, for the repeated-pass rescan inside `freeze`.
     rescan: Vec<Process>,
     environments: HashMap<ProcessIdentity, Environment>,
+    ages: HashMap<ProcessIdentity, Duration>,
 }
 impl FakePlatform {
     fn new(boot_id: &str) -> Self {
@@ -128,6 +129,9 @@ impl Platform for FakePlatform {
     }
     fn process_metrics(&self, _process: ProcessIdentity) -> Option<ProcessMetrics> {
         None
+    }
+    fn process_age(&self, process: ProcessIdentity) -> Option<Duration> {
+        self.ages.get(&process).copied()
     }
     fn pressure(&self) -> io::Result<PressureInputs> {
         Ok(PressureInputs::default())
@@ -250,6 +254,7 @@ fn agent(agent_id: &str, root: ProcessIdentity, memory_bytes: u64) -> Agent {
             bytes: memory_bytes,
             complete: true,
             growth_30s_bytes: None,
+            growth_bytes_per_sec: None,
         },
     }
 }
@@ -275,6 +280,7 @@ fn workload(
             bytes,
             complete: true,
             growth_30s_bytes,
+            growth_bytes_per_sec: growth_30s_bytes,
         },
     }
 }
@@ -462,17 +468,27 @@ fn macos_swap_rate_enters_elevated_only_after_two_consecutive_rate_samples() {
         ..PressureInputs::default()
     };
     assert_eq!(
-        state.sample(start, Some(&heavy(0)), &thresholds),
+        state.sample(start, Some(&heavy(0)), &thresholds, true),
         Level::Normal,
         "a lone baseline sample has no rate to judge"
     );
     assert_eq!(
-        state.sample(start + Duration::from_secs(1), Some(&heavy(1)), &thresholds),
+        state.sample(
+            start + Duration::from_secs(1),
+            Some(&heavy(1)),
+            &thresholds,
+            true
+        ),
         Level::Normal,
         "one over-threshold rate sample must not promote the level yet"
     );
     assert_eq!(
-        state.sample(start + Duration::from_secs(2), Some(&heavy(2)), &thresholds),
+        state.sample(
+            start + Duration::from_secs(2),
+            Some(&heavy(2)),
+            &thresholds,
+            true
+        ),
         Level::Elevated,
         "a second consecutive over-threshold rate sample must promote the level"
     );
@@ -492,7 +508,7 @@ fn linux_psi_enters_elevated_after_two_consecutive_samples() {
         ..PressureInputs::default()
     };
     assert_eq!(
-        state.sample(start, Some(&psi(15.0)), &thresholds),
+        state.sample(start, Some(&psi(15.0)), &thresholds, false),
         Level::Normal,
         "one sample above the linux elevated threshold must not promote the level yet"
     );
@@ -500,7 +516,8 @@ fn linux_psi_enters_elevated_after_two_consecutive_samples() {
         state.sample(
             start + Duration::from_secs(1),
             Some(&psi(15.0)),
-            &thresholds
+            &thresholds,
+            false
         ),
         Level::Elevated,
         "a second consecutive sample above the linux elevated threshold must promote it"
@@ -530,17 +547,27 @@ fn level_drops_by_one_only_after_ten_seconds_below_it() {
         kernel_pressure_level: Some(1),
         ..PressureInputs::default()
     };
-    state.sample(start, Some(&heavy(0)), &thresholds);
-    state.sample(start + Duration::from_secs(1), Some(&heavy(1)), &thresholds);
+    state.sample(start, Some(&heavy(0)), &thresholds, true);
+    state.sample(
+        start + Duration::from_secs(1),
+        Some(&heavy(1)),
+        &thresholds,
+        true,
+    );
     assert_eq!(
-        state.sample(start + Duration::from_secs(2), Some(&heavy(2)), &thresholds),
+        state.sample(
+            start + Duration::from_secs(2),
+            Some(&heavy(2)),
+            &thresholds,
+            true
+        ),
         Level::Elevated
     );
 
     // The rate drops to zero immediately, but the level must not follow for 10s.
     let below_since = start + Duration::from_secs(3);
     assert_eq!(
-        state.sample(below_since, Some(&quiet()), &thresholds),
+        state.sample(below_since, Some(&quiet()), &thresholds, true),
         Level::Elevated,
         "dropping below threshold must not demote the level immediately"
     );
@@ -548,7 +575,8 @@ fn level_drops_by_one_only_after_ten_seconds_below_it() {
         state.sample(
             below_since + Duration::from_secs(9),
             Some(&quiet()),
-            &thresholds
+            &thresholds,
+            true
         ),
         Level::Elevated,
         "9s below threshold is still short of the 10s exit hysteresis"
@@ -557,7 +585,8 @@ fn level_drops_by_one_only_after_ten_seconds_below_it() {
         state.sample(
             below_since + Duration::from_secs(10),
             Some(&quiet()),
-            &thresholds
+            &thresholds,
+            true
         ),
         Level::Normal,
         "10s continuously below threshold must demote exactly one level"
@@ -582,22 +611,42 @@ fn a_missing_sample_resets_both_entry_and_exit_hysteresis() {
 
     // One over-threshold rate sample builds up entry progress; a missing sample must discard it,
     // so the very next over-threshold pair needs its own two consecutive readings again.
-    state.sample(start, Some(&heavy(0)), &thresholds);
-    state.sample(start + Duration::from_secs(1), Some(&heavy(1)), &thresholds);
+    state.sample(start, Some(&heavy(0)), &thresholds, true);
+    state.sample(
+        start + Duration::from_secs(1),
+        Some(&heavy(1)),
+        &thresholds,
+        true,
+    );
     assert_eq!(
-        state.sample(start + Duration::from_secs(2), None, &thresholds),
+        state.sample(start + Duration::from_secs(2), None, &thresholds, true),
         Level::Normal,
         "a missing sample must return the unchanged level, not panic or guess"
     );
-    state.sample(start + Duration::from_secs(3), Some(&heavy(0)), &thresholds);
+    state.sample(
+        start + Duration::from_secs(3),
+        Some(&heavy(0)),
+        &thresholds,
+        true,
+    );
     assert_eq!(
-        state.sample(start + Duration::from_secs(4), Some(&heavy(1)), &thresholds),
+        state.sample(
+            start + Duration::from_secs(4),
+            Some(&heavy(1)),
+            &thresholds,
+            true
+        ),
         Level::Normal,
         "the missing sample must have discarded the earlier rate baseline entirely"
     );
 
     // Symmetrically, a missing sample while counting down an exit must restart that countdown.
-    let elevated_at = state.sample(start + Duration::from_secs(5), Some(&heavy(2)), &thresholds);
+    let elevated_at = state.sample(
+        start + Duration::from_secs(5),
+        Some(&heavy(2)),
+        &thresholds,
+        true,
+    );
     assert_eq!(elevated_at, Level::Elevated);
     let quiet = PressureInputs {
         page_size: 4096,
@@ -605,13 +654,19 @@ fn a_missing_sample_resets_both_entry_and_exit_hysteresis() {
         ..PressureInputs::default()
     };
     let below_since = start + Duration::from_secs(6);
-    state.sample(below_since, Some(&quiet), &thresholds);
-    state.sample(below_since + Duration::from_secs(9), None, &thresholds);
+    state.sample(below_since, Some(&quiet), &thresholds, true);
+    state.sample(
+        below_since + Duration::from_secs(9),
+        None,
+        &thresholds,
+        true,
+    );
     assert_eq!(
         state.sample(
             below_since + Duration::from_secs(10),
             Some(&quiet),
-            &thresholds
+            &thresholds,
+            true
         ),
         Level::Elevated,
         "the missing sample mid-countdown must have restarted the 10s exit timer"
@@ -2425,5 +2480,370 @@ mod episode_cooldown {
             "episode two never announced a pause (first freeze inside cooldown: {} notifications)",
             silent_first
         );
+    }
+}
+
+#[test]
+fn linux_swap_burst_uses_only_psi_even_when_psi_is_unavailable() {
+    let home = TestHome::new("linux-swap-burst");
+    let mut guardian = Guardian::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Observe,
+        Thresholds::default(),
+    );
+    let mut platform = FakePlatform::new("boot-1");
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = home.log();
+    let start = Instant::now();
+    for step in 0..6 {
+        let mut snap = snapshot(
+            Some(PressureInputs {
+                page_size: 4096,
+                swapouts: Some(step * 122_880), // 480 MiB/s, the Linux scenario's false driver.
+                psi_some_avg10: (step < 3).then_some(5.10),
+                psi_full_avg10: (step < 3).then_some(2.43),
+                ..Default::default()
+            }),
+            AttributionSnapshot::default(),
+            Vec::new(),
+        );
+        snap.capabilities.kernel_pressure = false;
+        guardian
+            .tick(
+                start + Duration::from_secs(step),
+                &snap,
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .unwrap();
+        assert_eq!(guardian.level, Level::Normal);
+        assert_eq!(guardian.pressure.valid, step < 3);
+    }
+}
+
+#[test]
+fn linux_fast_spike_freezes_with_short_history_but_not_steady_or_unknown_growth() {
+    for shape in ["spike", "steady", "unknown"] {
+        let home = TestHome::new(shape);
+        let mut guardian = Guardian::new(
+            home.0.clone(),
+            "boot-1".into(),
+            Mode::Observe,
+            Thresholds::default(),
+        );
+        let root = id(9100, 1);
+        let batch = id(9101, 1);
+        let mut platform = FakePlatform::new("boot-1").env(
+            root,
+            &[
+                ("CLAUDE_CODE_SESSION_ID", "t16-spike"),
+                ("CLAUDE_PID", "9100"),
+            ],
+        );
+        platform.ages.insert(batch, Duration::ZERO);
+        let mut attributor = Attributor::new(Vec::new(), Vec::new());
+        let mut log = home.log();
+        let start = Instant::now();
+        for step in 0..=24 {
+            let ms = step * 250;
+            let now = start + Duration::from_millis(ms);
+            // Scenario 2: 3.7 GiB allocated in 3.2 seconds, Critical around five seconds.
+            let bytes = if shape == "spike" {
+                37 * GIB / 10 * ms.min(3200) / 3200
+            } else {
+                37 * GIB / 10
+            };
+            let mut processes = vec![process(root, 1, 3 * GIB), process(batch, root.pid, bytes)];
+            processes[0].exe = Some("/usr/bin/claude".into());
+            processes[0].argv = Some(vec!["claude".into()]);
+            processes[1].exe = Some("/bin/sh".into());
+            processes[1].argv = Some(vec!["sh".into(), "-c".into(), "grow".into()]);
+            if shape == "unknown" {
+                processes[1].metrics = None;
+            }
+            let attribution = attributor.update(&platform, &mut processes, now, ms, false);
+            assert_eq!(attribution.workloads.len(), 1);
+            assert_eq!(attribution.workloads[0].class, WorkloadClass::Batch);
+            let mut snap = snapshot(
+                Some(PressureInputs {
+                    used_memory_bytes: Some(8 * GIB),
+                    psi_some_avg10: Some(15.0),
+                    psi_full_avg10: Some(if ms >= 4750 { 6.0 } else { 2.43 }),
+                    ..Default::default()
+                }),
+                attribution,
+                processes,
+            );
+            snap.capabilities.kernel_pressure = false;
+            guardian
+                .tick(now, &snap, &mut platform, &mut attributor, &mut log)
+                .unwrap();
+            if ms == 5000 {
+                assert_eq!(guardian.level, Level::Critical);
+                assert_eq!(
+                    guardian.frozen.len(),
+                    usize::from(shape == "spike"),
+                    "shape={shape}, note={:?}",
+                    guardian.note
+                );
+            }
+        }
+        assert_eq!(
+            guardian.frozen.len(),
+            usize::from(shape == "spike"),
+            "shape={shape}"
+        );
+        assert_eq!(platform.signal_count(), 0);
+        assert!(platform.notifications().is_empty());
+    }
+}
+
+#[test]
+fn macos_window_smooths_bursts_independent_of_tick_cadence() {
+    let start = Instant::now();
+    for cadence_ms in [250, 700, 1000] {
+        let home = TestHome::new(&format!("rate-window-{cadence_ms}"));
+        let mut guardian = Guardian::new(
+            home.0.clone(),
+            "boot-1".into(),
+            Mode::Observe,
+            Thresholds::default(),
+        );
+        let mut platform = FakePlatform::new("boot-1");
+        let mut attributor = Attributor::new(Vec::new(), Vec::new());
+        let mut log = home.log();
+        let mut times: Vec<usize> = (0..=12500)
+            .step_by(cadence_ms)
+            .chain([6000, 8000, 12500])
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        for ms in times {
+            // A two-second 400 MiB/s burst, then quiet: 160 MiB/s over five seconds.
+            let pages = ms.saturating_sub(6000).min(2000) as u64 * 400 * 256 / 1000;
+            let snap = snapshot(
+                Some(PressureInputs {
+                    page_size: 4096,
+                    kernel_pressure_level: Some(1),
+                    pageouts: Some(0),
+                    swapouts: Some(pages),
+                    ..Default::default()
+                }),
+                AttributionSnapshot::default(),
+                Vec::new(),
+            );
+            guardian
+                .tick(
+                    start + Duration::from_millis(ms as u64),
+                    &snap,
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+            assert_ne!(
+                guardian.level,
+                Level::Critical,
+                "cadence={cadence_ms}, ms={ms}"
+            );
+        }
+        assert_eq!(guardian.note.swapout_mib_per_sec, Some(40.0));
+    }
+}
+
+#[test]
+fn macos_kernel_critical_acts_on_first_sample_without_rate_history() {
+    let home = TestHome::new("kernel-fast-path");
+    let mut guardian = Guardian::new(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Observe,
+        Thresholds::default(),
+    );
+    let mut platform = FakePlatform::new("boot-1");
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = home.log();
+    let snap = snapshot(
+        Some(PressureInputs {
+            kernel_pressure_level: Some(4),
+            ..Default::default()
+        }),
+        AttributionSnapshot::default(),
+        Vec::new(),
+    );
+    guardian
+        .tick(
+            Instant::now(),
+            &snap,
+            &mut platform,
+            &mut attributor,
+            &mut log,
+        )
+        .unwrap();
+    assert_eq!(guardian.level, Level::Critical);
+}
+
+#[test]
+#[ignore = "requires BALLAST_PRESSURE_TRACE pointing to a T14 raw JSONL trace"]
+fn replay_pressure_trace() {
+    let path = std::env::var("BALLAST_PRESSURE_TRACE").expect("raw JSONL trace path");
+    let home = TestHome::new("trace-replay");
+    let mut guardian = Guardian::new(
+        home.0.clone(),
+        "replay".into(),
+        Mode::Observe,
+        Thresholds::default(),
+    );
+    let mut platform = FakePlatform::new("replay");
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = home.log();
+    let start = Instant::now();
+    let mut next_tick = 0.0;
+    let mut previous = 0.0;
+    let mut seconds = [0.0; 3];
+    let mut ticks = 0;
+    let mut transitions = Vec::new();
+    let macos = std::env::var("BALLAST_REPLAY_PLATFORM").as_deref() != Ok("linux");
+    for line in std::fs::read_to_string(path).unwrap().lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let elapsed = row["elapsed_s"].as_f64().unwrap();
+        seconds[guardian.level as usize] += elapsed - previous;
+        previous = elapsed;
+        if elapsed < next_tick {
+            continue;
+        }
+        let pressure = if row["discarded"] == true {
+            None
+        } else {
+            Some(serde_json::from_value(row["inputs"].clone()).unwrap())
+        };
+        let mut snap = snapshot(pressure, AttributionSnapshot::default(), Vec::new());
+        snap.capabilities.kernel_pressure = macos;
+        let before = guardian.level;
+        guardian
+            .tick(
+                start + Duration::from_secs_f64(elapsed),
+                &snap,
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .unwrap();
+        if guardian.level != before {
+            transitions.push(serde_json::json!({"elapsed_s": elapsed, "from": before, "to": guardian.level, "note": guardian.note}));
+        }
+        ticks += 1;
+        next_tick = elapsed
+            + if guardian.level == Level::Normal {
+                1.0
+            } else {
+                0.25
+            };
+    }
+    let result = serde_json::json!({"window_s": PRESSURE_RATE_WINDOW.as_secs_f64(),
+        "normal_s": seconds[0], "elevated_s": seconds[1], "critical_s": seconds[2], "ticks": ticks,
+        "first_critical_s": transitions.iter().find(|t| t["to"] == "critical").map(|t| &t["elapsed_s"]), "transitions": transitions});
+    println!("{result}");
+    if let Ok(output) = std::env::var("BALLAST_REPLAY_OUTPUT") {
+        std::fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
+    if std::env::var_os("BALLAST_REPLAY_AMBIENT").is_some() {
+        assert!(
+            seconds[2] < 1.0,
+            "ambient trace must spend near-zero time Critical"
+        );
+    }
+    assert_eq!(platform.signal_count(), 0);
+    assert!(platform.notifications().is_empty());
+}
+
+#[test]
+fn linux_psi_totals_detect_stalls_before_avg10_and_fall_back_after_gaps() {
+    for cadence_ms in [250, 1000] {
+        let home = TestHome::new(&format!("psi-totals-{cadence_ms}"));
+        let mut guardian = Guardian::new(
+            home.0.clone(),
+            "boot-1".into(),
+            Mode::Observe,
+            Thresholds::default(),
+        );
+        let mut platform = FakePlatform::new("boot-1");
+        let mut attributor = Attributor::new(Vec::new(), Vec::new());
+        let mut log = home.log();
+        let start = Instant::now();
+        for ms in (0u64..=8000).step_by(cadence_ms) {
+            let burst_ms = ms.saturating_sub(5000).min(2000);
+            let mut snap = snapshot(
+                Some(PressureInputs {
+                    psi_some_avg10: Some(0.0),
+                    psi_full_avg10: Some(0.0),
+                    psi_some_total_us: Some(burst_ms * 250),
+                    psi_full_total_us: Some(burst_ms * 200),
+                    ..Default::default()
+                }),
+                AttributionSnapshot::default(),
+                Vec::new(),
+            );
+            snap.capabilities.kernel_pressure = false;
+            guardian
+                .tick(
+                    start + Duration::from_millis(ms),
+                    &snap,
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        assert_eq!(guardian.level, Level::Critical, "cadence={cadence_ms}");
+        assert_eq!(guardian.note.psi_some_percent, Some(10.0));
+        assert_eq!(guardian.note.psi_full_percent, Some(8.0));
+        // Missing totals fall back to avg10, retaining the ten-second exit hold.
+        for seconds in [9, 19, 20, 30] {
+            let mut snap = snapshot(
+                Some(PressureInputs {
+                    psi_some_avg10: Some(0.0),
+                    psi_full_avg10: Some(0.0),
+                    ..Default::default()
+                }),
+                AttributionSnapshot::default(),
+                Vec::new(),
+            );
+            snap.capabilities.kernel_pressure = false;
+            guardian
+                .tick(
+                    start + Duration::from_secs(seconds),
+                    &snap,
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        assert_eq!(guardian.level, Level::Normal);
+        for seconds in [31, 32] {
+            let mut snap = snapshot(
+                Some(PressureInputs {
+                    psi_some_avg10: Some(11.0),
+                    psi_full_avg10: Some(0.0),
+                    ..Default::default()
+                }),
+                AttributionSnapshot::default(),
+                Vec::new(),
+            );
+            snap.capabilities.kernel_pressure = false;
+            guardian
+                .tick(
+                    start + Duration::from_secs(seconds),
+                    &snap,
+                    &mut platform,
+                    &mut attributor,
+                    &mut log,
+                )
+                .unwrap();
+        }
+        assert_eq!(guardian.level, Level::Elevated);
     }
 }
