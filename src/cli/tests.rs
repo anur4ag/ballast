@@ -152,8 +152,8 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             .unwrap()
             .keys()
             .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["status", "type", "version"]
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["status", "type", "version"])
     );
     assert_eq!(
         status["status"]
@@ -161,8 +161,8 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             .unwrap()
             .keys()
             .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
             "batch_running",
             "cleanup_pending",
             "daemon_version",
@@ -177,7 +177,7 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             "tick_cpu_ns",
             "tick_interval_ms",
             "tick_wall_ns"
-        ]
+        ])
     );
     let mut ps = serde_json::to_value(Response::new(Reply::Snapshot {
         snapshot: std::sync::Arc::new(s),
@@ -192,8 +192,8 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             .unwrap()
             .keys()
             .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
             "attribution",
             "boot_id",
             "capabilities",
@@ -205,7 +205,7 @@ fn json_envelopes_and_additive_snapshot_fields_are_stable() {
             "processes",
             "status",
             "today"
-        ]
+        ])
     );
     ps["snapshot"].as_object_mut().unwrap().remove("today");
     ps["snapshot"].as_object_mut().unwrap().remove("held");

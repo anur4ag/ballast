@@ -666,8 +666,26 @@ fn codex_hash(event: &str, group: &Value, hook: &Value) -> String {
     }
     format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&identity).unwrap())
+        Sha256::digest(serde_json::to_vec(&sorted_keys(&identity)).unwrap())
     )
+}
+
+// serde_json preserves key order so user configs keep their layout; canonical JSON sorts.
+fn sorted_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), sorted_keys(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted_keys).collect()),
+        _ => value.clone(),
+    }
 }
 
 struct ConfigEdit {

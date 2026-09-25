@@ -421,3 +421,38 @@ fn install_and_uninstall_plans_wrap_without_losing_content() {
         }
     }
 }
+
+#[test]
+fn codex_hash_is_independent_of_key_order() {
+    let hook: Value = serde_json::from_str(
+        r#"{"type": "command", "timeout": 1, "command": "ballast hook codex", "statusMessage": "x"}"#,
+    )
+    .unwrap();
+    let group: Value = serde_json::from_str(r#"{"matcher": "Bash", "hooks": []}"#).unwrap();
+    assert_eq!(
+        codex_hash("pre_tool_use", &group, &hook),
+        "sha256:862d5d8475bf0790801f23b5fc90c9d0e0a07f533971472f93be63b505887c88"
+    );
+}
+
+#[test]
+fn install_keeps_the_users_key_order() {
+    let fixture = Fixture::new();
+    let original = "{\n  \"zeta\": 1,\n  \"hooks\": {\n    \"Unrelated\": []\n  },\n  \"alpha\": {\n    \"y\": 1,\n    \"b\": 2\n  }\n}\n";
+    for (path, _) in fixture.0.config_files() {
+        atomic_write(&path, original.as_bytes()).unwrap();
+    }
+    fixture.merge(true);
+    for (path, _) in fixture.0.config_files() {
+        let text = fs::read_to_string(&path).unwrap();
+        let order: Vec<_> = ["\"zeta\"", "\"hooks\"", "\"alpha\"", "\"y\"", "\"b\""]
+            .iter()
+            .map(|key| text.find(key).unwrap())
+            .collect();
+        assert!(order.is_sorted(), "{path:?} reordered keys:\n{text}");
+    }
+    fixture.merge(false);
+    for (path, _) in fixture.0.config_files() {
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+}
