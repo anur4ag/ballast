@@ -143,3 +143,11 @@ Scenario 8 selects its memory condition only in this profile.
 All other deadlines, owned-identity checks and emergency stops remain in force.
 Stop Lima, check for concurrent builds, record ambient memory, then use `--memory-mib` to select ambient free memory plus about 3 GiB within that ceiling.
 This profile is not permission to run pressure without the user's approval.
+
+
+## Offline hook-phase reports
+
+For a capture from a separately instrumented measurement build, `python3 spikes/analyze_hook_phases.py CAPTURE_DIRECTORY --output OUTPUT_DIRECTORY` joins the per-PID monotonic phase events with the hook audit records.
+It reports per-phase p50/p99/max, internal deadline headroom and each path's worst internal-call timeline.
+The analyzer generates no load and does not add instrumentation to product builds.
+Hook and daemon phase intervals overlap, so the report rows must not be summed.
