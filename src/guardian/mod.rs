@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::time::{Duration, Instant};
 
-const PRESSURE_RATE_WINDOW: Duration = Duration::from_secs(5);
+const MACOS_PRESSURE_RATE_WINDOW: Duration = Duration::from_secs(5);
+const LINUX_PRESSURE_RATE_WINDOW: Duration = Duration::from_secs(2);
 
 const COOLDOWN: Duration = Duration::from_secs(5);
 const MAX_FREEZE: Duration = Duration::from_secs(600);
@@ -69,7 +70,7 @@ impl Thresholds {
 #[derive(Default)]
 struct RateWindow(VecDeque<(Instant, u64)>);
 impl RateWindow {
-    fn sample(&mut self, now: Instant, counter: Option<u64>) -> Option<f64> {
+    fn sample(&mut self, now: Instant, counter: Option<u64>, window: Duration) -> Option<f64> {
         let Some(counter) = counter else {
             self.0.clear();
             return None;
@@ -85,7 +86,7 @@ impl RateWindow {
         while self
             .0
             .get(1)
-            .is_some_and(|&(then, _)| now.duration_since(then) >= PRESSURE_RATE_WINDOW)
+            .is_some_and(|&(then, _)| now.duration_since(then) >= window)
         {
             self.0.pop_front();
         }
@@ -94,7 +95,7 @@ impl RateWindow {
         if elapsed == 0.0 {
             return None;
         }
-        let window = PRESSURE_RATE_WINDOW.as_secs_f64();
+        let window = window.as_secs_f64();
         let mut delta = (counter - old) as f64;
         if elapsed > window {
             let &(next, next_counter) = &self.0[1];
@@ -152,11 +153,11 @@ impl PressureState {
             let mib_per_page = input.page_size as f64 / 1048576.0;
             self.pageout_mib_per_sec = self
                 .pageouts
-                .sample(now, input.pageouts)
+                .sample(now, input.pageouts, MACOS_PRESSURE_RATE_WINDOW)
                 .map(|rate| rate * mib_per_page);
             self.swapout_mib_per_sec = self
                 .swapouts
-                .sample(now, input.swapouts)
+                .sample(now, input.swapouts, MACOS_PRESSURE_RATE_WINDOW)
                 .map(|rate| rate * mib_per_page);
         } else {
             let percent = |rate: Option<f64>, avg10: Option<f64>| {
@@ -164,11 +165,13 @@ impl PressureState {
                     .or(avg10.filter(|v| v.is_finite() && (0.0..=100.0).contains(v)))
             };
             self.psi_some_percent = percent(
-                self.psi_some.sample(now, input.psi_some_total_us),
+                self.psi_some
+                    .sample(now, input.psi_some_total_us, LINUX_PRESSURE_RATE_WINDOW),
                 input.psi_some_avg10,
             );
             self.psi_full_percent = percent(
-                self.psi_full.sample(now, input.psi_full_total_us),
+                self.psi_full
+                    .sample(now, input.psi_full_total_us, LINUX_PRESSURE_RATE_WINDOW),
                 input.psi_full_avg10,
             );
         }
@@ -284,6 +287,7 @@ pub struct Guardian {
     boot_id: String,
     mode: Mode,
     thresholds: Thresholds,
+    macos: bool,
     pressure: PressureState,
     invalid_since: Option<Instant>,
     errors: Vec<String>,
@@ -307,6 +311,7 @@ impl Guardian {
             boot_id,
             mode,
             thresholds,
+            macos: cfg!(target_os = "macos"),
             pressure: PressureState::default(),
             invalid_since: None,
             errors: Vec::new(),
@@ -388,7 +393,7 @@ impl Guardian {
             now,
             snapshot.pressure.as_ref(),
             &self.thresholds,
-            snapshot.capabilities.kernel_pressure,
+            self.macos,
         );
         let pressure_unknown = if self.pressure.valid {
             self.invalid_since = None;

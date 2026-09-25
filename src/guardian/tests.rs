@@ -418,6 +418,18 @@ fn cool_to_normal(
     now
 }
 
+/// Builds a `Guardian` exactly like `Guardian::new`, then forces macOS swap-rate policy
+/// (`guardian.macos = true`) regardless of the host this suite actually runs on: almost every
+/// fixture here (`heavy_swap`, `warm_to_critical`, ...) is written against that policy, and
+/// `Guardian::new` otherwise picks it from `cfg!(target_os = "macos")`, which would silently
+/// switch every one of these scenarios to Linux PSI policy on non-macOS CI. The handful of
+/// Linux-specific regressions set `guardian.macos = false` themselves right after calling this.
+fn new_guardian(paths: Paths, boot_id: String, mode: Mode, thresholds: Thresholds) -> Guardian {
+    let mut guardian = Guardian::new(paths, boot_id, mode, thresholds);
+    guardian.macos = true;
+    guardian
+}
+
 struct TestHome(Paths);
 impl TestHome {
     fn new(tag: &str) -> Self {
@@ -691,7 +703,7 @@ fn tick_never_freezes_on_a_sample_with_no_valid_pressure_signal() {
     // drive a freeze decision, even while the guardian is still at a stale `Critical` from an
     // earlier, valid reading.
     let home = TestHome::new("invalid-pressure-no-freeze");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -749,7 +761,7 @@ fn tick_never_freezes_on_a_sample_with_no_valid_pressure_signal() {
 #[test]
 fn critical_freeze_stands_down_when_pressure_is_not_agents_fault() {
     let home = TestHome::new("fault-standdown");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -807,7 +819,7 @@ fn critical_freeze_stands_down_when_pressure_is_not_agents_fault() {
 #[test]
 fn critical_freeze_proceeds_when_agents_hold_at_least_thirty_percent() {
     let home = TestHome::new("fault-proceeds");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -858,7 +870,7 @@ fn critical_freeze_proceeds_when_agents_hold_at_least_thirty_percent() {
 #[test]
 fn one_freeze_per_five_second_cooldown_and_only_the_first_notifies() {
     let home = TestHome::new("cooldown");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -987,7 +999,7 @@ fn one_freeze_per_five_second_cooldown_and_only_the_first_notifies() {
 #[test]
 fn victim_choice_prefers_batch_over_service_when_both_are_expendable() {
     let home = TestHome::new("victim-batch-over-service");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1066,7 +1078,7 @@ fn victim_choice_prefers_batch_over_service_when_both_are_expendable() {
 #[test]
 fn victim_choice_among_batches_ties_broken_by_newest() {
     let home = TestHome::new("victim-newest-tiebreak");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1131,7 +1143,7 @@ fn victim_choice_among_batches_ties_broken_by_newest() {
 #[test]
 fn last_batch_stands_down_when_any_eligible_workloads_growth_is_unknown() {
     let home = TestHome::new("last-batch-unknown-growth");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1178,7 +1190,7 @@ fn last_batch_stands_down_when_any_eligible_workloads_growth_is_unknown() {
 #[test]
 fn last_batch_is_blocked_by_a_faster_growing_eligible_service() {
     let home = TestHome::new("last-batch-slower-than-service");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1240,7 +1252,7 @@ fn last_batch_is_blocked_by_a_faster_growing_eligible_service() {
 #[test]
 fn last_batch_freezes_when_it_is_provably_the_fastest_eligible_workload() {
     let home = TestHome::new("last-batch-is-fastest");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1304,7 +1316,7 @@ fn last_batch_freezes_when_it_is_provably_the_fastest_eligible_workload() {
 #[test]
 fn never_freezes_agent_root_agent_internal_or_unattributed_processes() {
     let home = TestHome::new("eligibility-roles");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1372,7 +1384,7 @@ fn never_freezes_agent_root_agent_internal_or_unattributed_processes() {
 #[test]
 fn max_freeze_forces_resume_after_ten_minutes_and_marks_ineligible_for_five() {
     let home = TestHome::new("max-freeze");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1448,7 +1460,7 @@ fn max_freeze_also_expires_on_a_wall_clock_jump_even_when_monotonic_time_barely_
     // independent of the monotonic branch, so a forced resume still bounds the pause across a
     // suspend/wake even then.
     let home = TestHome::new("max-freeze-wall-clock");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1509,7 +1521,7 @@ fn max_freeze_also_expires_on_a_wall_clock_jump_even_when_monotonic_time_barely_
 #[test]
 fn manual_resume_marks_the_workload_ineligible_for_five_minutes() {
     let home = TestHome::new("manual-resume-ineligible");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1592,7 +1604,7 @@ fn manual_resume_marks_the_workload_ineligible_for_five_minutes() {
 #[test]
 fn resume_accepts_a_short_workload_handle() {
     let home = TestHome::new("resume-short-handle");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1651,7 +1663,7 @@ fn resume_accepts_a_short_workload_handle() {
 #[test]
 fn resumes_frozen_workloads_fifo_one_at_a_time_five_seconds_apart() {
     let home = TestHome::new("fifo-resume");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1820,7 +1832,7 @@ fn resumes_frozen_workloads_fifo_one_at_a_time_five_seconds_apart() {
 #[test]
 fn observe_mode_reaches_the_same_freeze_decision_without_acting_on_it() {
     let enforce_home = TestHome::new("observe-parity-enforce");
-    let mut enforce_guardian = Guardian::new(
+    let mut enforce_guardian = new_guardian(
         enforce_home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -1837,7 +1849,7 @@ fn observe_mode_reaches_the_same_freeze_decision_without_acting_on_it() {
     );
 
     let observe_home = TestHome::new("observe-parity-observe");
-    let mut observe_guardian = Guardian::new(
+    let mut observe_guardian = new_guardian(
         observe_home.0.clone(),
         "boot-1".into(),
         Mode::Observe,
@@ -1973,7 +1985,7 @@ fn observe_mode_reaches_the_same_freeze_decision_without_acting_on_it() {
 #[test]
 fn late_children_are_persisted_before_their_own_stop_signal() {
     let home = TestHome::new("late-child-persist");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2087,7 +2099,7 @@ fn late_children_are_persisted_before_their_own_stop_signal() {
 #[test]
 fn a_failed_resume_signal_leaves_the_frozen_journal_entry_in_place() {
     let home = TestHome::new("failed-resume-retains-journal");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2170,7 +2182,7 @@ fn watched_returns_every_frozen_process_across_all_workloads() {
     // `FrozenWorkload.since` is private to `guardian`, not `pub`, but this test module is a
     // descendant of it and may construct one directly -- no real freeze needed for this fixture.
     let home = TestHome::new("watched");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2200,7 +2212,7 @@ fn watched_returns_every_frozen_process_across_all_workloads() {
 #[test]
 fn batch_running_is_true_only_while_a_batch_workload_is_actually_running() {
     let home = TestHome::new("batch-running");
-    let guardian = Guardian::new(
+    let guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2256,7 +2268,7 @@ fn batch_running_is_true_only_while_a_batch_workload_is_actually_running() {
 #[test]
 fn notifications_are_limited_per_kind_to_one_per_minute() {
     let home = TestHome::new("notification-interval");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2287,7 +2299,7 @@ fn notifications_are_limited_per_kind_to_one_per_minute() {
 #[test]
 fn max_freeze_notifications_ignore_the_per_minute_limit() {
     let home = TestHome::new("max-freeze-rate-limit");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -2330,7 +2342,7 @@ mod episode_cooldown {
     #[test]
     fn second_episode_announces_after_the_cooldown_expires() {
         let home = TestHome::new("episode-probe");
-        let mut guardian = Guardian::new(
+        let mut guardian = new_guardian(
             home.0.clone(),
             "boot-1".into(),
             Mode::Enforce,
@@ -2486,12 +2498,13 @@ mod episode_cooldown {
 #[test]
 fn linux_swap_burst_uses_only_psi_even_when_psi_is_unavailable() {
     let home = TestHome::new("linux-swap-burst");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Observe,
         Thresholds::default(),
     );
+    guardian.macos = false;
     let mut platform = FakePlatform::new("boot-1");
     let mut attributor = Attributor::new(Vec::new(), Vec::new());
     let mut log = home.log();
@@ -2527,12 +2540,13 @@ fn linux_swap_burst_uses_only_psi_even_when_psi_is_unavailable() {
 fn linux_fast_spike_freezes_with_short_history_but_not_steady_or_unknown_growth() {
     for shape in ["spike", "steady", "unknown"] {
         let home = TestHome::new(shape);
-        let mut guardian = Guardian::new(
+        let mut guardian = new_guardian(
             home.0.clone(),
             "boot-1".into(),
             Mode::Observe,
             Thresholds::default(),
         );
+        guardian.macos = false;
         let root = id(9100, 1);
         let batch = id(9101, 1);
         let mut platform = FakePlatform::new("boot-1").env(
@@ -2605,7 +2619,7 @@ fn macos_window_smooths_bursts_independent_of_tick_cadence() {
     let start = Instant::now();
     for cadence_ms in [250, 700, 1000] {
         let home = TestHome::new(&format!("rate-window-{cadence_ms}"));
-        let mut guardian = Guardian::new(
+        let mut guardian = new_guardian(
             home.0.clone(),
             "boot-1".into(),
             Mode::Observe,
@@ -2656,7 +2670,7 @@ fn macos_window_smooths_bursts_independent_of_tick_cadence() {
 #[test]
 fn macos_kernel_critical_acts_on_first_sample_without_rate_history() {
     let home = TestHome::new("kernel-fast-path");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Observe,
@@ -2686,11 +2700,54 @@ fn macos_kernel_critical_acts_on_first_sample_without_rate_history() {
 }
 
 #[test]
+fn macos_policy_reaches_critical_via_swap_rate_even_when_kernel_pressure_capability_is_false() {
+    // Regression: `capabilities.kernel_pressure` says whether this platform exposes a kernel
+    // pressure level at all, not which OS's policy to run. Tying macOS-vs-Linux selection to it
+    // (as `tick` used to) meant a macOS host that happens to lack that sysctl silently fell back
+    // to Linux PSI policy and never detected swap-driven pressure. `guardian.macos` is the real
+    // policy switch now, independent of this capability.
+    let home = TestHome::new("macos-policy-despite-false-capability");
+    let mut guardian = new_guardian(
+        home.0.clone(),
+        "boot-1".into(),
+        Mode::Observe,
+        Thresholds::default(),
+    );
+    guardian.macos = true;
+    let mut platform = FakePlatform::new("boot-1");
+    let mut attributor = Attributor::new(Vec::new(), Vec::new());
+    let mut log = home.log();
+    let start = Instant::now();
+    for step in 0..3u64 {
+        let mut snap = snapshot(
+            Some(heavy_swap(step)),
+            AttributionSnapshot::default(),
+            Vec::new(),
+        );
+        snap.capabilities.kernel_pressure = false;
+        guardian
+            .tick(
+                start + Duration::from_secs(step),
+                &snap,
+                &mut platform,
+                &mut attributor,
+                &mut log,
+            )
+            .expect("tick");
+    }
+    assert_eq!(
+        guardian.level,
+        Level::Critical,
+        "macOS swap-rate policy must still reach Critical when the kernel_pressure capability is false"
+    );
+}
+
+#[test]
 #[ignore = "requires BALLAST_PRESSURE_TRACE pointing to a T14 raw JSONL trace"]
 fn replay_pressure_trace() {
     let path = std::env::var("BALLAST_PRESSURE_TRACE").expect("raw JSONL trace path");
     let home = TestHome::new("trace-replay");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "replay".into(),
         Mode::Observe,
@@ -2705,7 +2762,12 @@ fn replay_pressure_trace() {
     let mut seconds = [0.0; 3];
     let mut ticks = 0;
     let mut transitions = Vec::new();
+    let with_attribution = std::env::var_os("BALLAST_REPLAY_ATTRIBUTION").is_some();
+    let mut first_positive_growth = None;
+    let mut first_freeze = None;
+    let mut growth_samples = Vec::new();
     let macos = std::env::var("BALLAST_REPLAY_PLATFORM").as_deref() != Ok("linux");
+    guardian.macos = macos;
     for line in std::fs::read_to_string(path).unwrap().lines() {
         let row: serde_json::Value = serde_json::from_str(line).unwrap();
         let elapsed = row["elapsed_s"].as_f64().unwrap();
@@ -2719,7 +2781,49 @@ fn replay_pressure_trace() {
         } else {
             Some(serde_json::from_value(row["inputs"].clone()).unwrap())
         };
-        let mut snap = snapshot(pressure, AttributionSnapshot::default(), Vec::new());
+        let now = start + Duration::from_secs_f64(elapsed);
+        let mut processes: Vec<Process> = if with_attribution {
+            serde_json::from_value(row["processes"].clone()).unwrap()
+        } else {
+            Vec::new()
+        };
+        for process in &mut processes {
+            process.uid = unsafe { libc::geteuid() };
+            platform
+                .ages
+                .entry(process.identity)
+                .or_insert(Duration::ZERO);
+        }
+        if with_attribution {
+            let recorded: AttributionSnapshot =
+                serde_json::from_value(row["attribution"].clone()).unwrap();
+            for root in recorded.agents.into_iter().filter_map(|a| a.root) {
+                platform.environments.insert(
+                    root,
+                    [
+                        ("CLAUDE_CODE_SESSION_ID".into(), "t16-replay".into()),
+                        ("CLAUDE_PID".into(), root.pid.to_string()),
+                    ]
+                    .into(),
+                );
+            }
+        }
+        let attribution = attributor.update(
+            &platform,
+            &mut processes,
+            now,
+            row["time_ms"].as_u64().unwrap(),
+            row["discarded"] == true,
+        );
+        if with_attribution {
+            for workload in &attribution.workloads {
+                growth_samples.push(serde_json::json!({"elapsed_s": elapsed, "memory": workload.memory, "class": workload.class}));
+                if workload.memory.growth_bytes_per_sec.is_some_and(|v| v > 0) {
+                    first_positive_growth.get_or_insert(elapsed);
+                }
+            }
+        }
+        let mut snap = snapshot(pressure, attribution, processes);
         snap.capabilities.kernel_pressure = macos;
         let before = guardian.level;
         guardian
@@ -2731,6 +2835,9 @@ fn replay_pressure_trace() {
                 &mut log,
             )
             .unwrap();
+        if !guardian.frozen.is_empty() {
+            first_freeze.get_or_insert(elapsed);
+        }
         if guardian.level != before {
             transitions.push(serde_json::json!({"elapsed_s": elapsed, "from": before, "to": guardian.level, "note": guardian.note}));
         }
@@ -2742,8 +2849,14 @@ fn replay_pressure_trace() {
                 0.25
             };
     }
-    let result = serde_json::json!({"window_s": PRESSURE_RATE_WINDOW.as_secs_f64(),
+    let window = if macos {
+        MACOS_PRESSURE_RATE_WINDOW
+    } else {
+        LINUX_PRESSURE_RATE_WINDOW
+    };
+    let result = serde_json::json!({"window_s": window.as_secs_f64(),
         "normal_s": seconds[0], "elevated_s": seconds[1], "critical_s": seconds[2], "ticks": ticks,
+        "first_positive_growth_s": first_positive_growth, "first_freeze_s": first_freeze, "growth_samples": growth_samples,
         "first_critical_s": transitions.iter().find(|t| t["to"] == "critical").map(|t| &t["elapsed_s"]), "transitions": transitions});
     println!("{result}");
     if let Ok(output) = std::env::var("BALLAST_REPLAY_OUTPUT") {
@@ -2763,12 +2876,13 @@ fn replay_pressure_trace() {
 fn linux_psi_totals_detect_stalls_before_avg10_and_fall_back_after_gaps() {
     for cadence_ms in [250, 1000] {
         let home = TestHome::new(&format!("psi-totals-{cadence_ms}"));
-        let mut guardian = Guardian::new(
+        let mut guardian = new_guardian(
             home.0.clone(),
             "boot-1".into(),
             Mode::Observe,
             Thresholds::default(),
         );
+        guardian.macos = false;
         let mut platform = FakePlatform::new("boot-1");
         let mut attributor = Attributor::new(Vec::new(), Vec::new());
         let mut log = home.log();
@@ -2798,8 +2912,8 @@ fn linux_psi_totals_detect_stalls_before_avg10_and_fall_back_after_gaps() {
                 .unwrap();
         }
         assert_eq!(guardian.level, Level::Critical, "cadence={cadence_ms}");
-        assert_eq!(guardian.note.psi_some_percent, Some(10.0));
-        assert_eq!(guardian.note.psi_full_percent, Some(8.0));
+        assert_eq!(guardian.note.psi_some_percent, Some(12.5));
+        assert_eq!(guardian.note.psi_full_percent, Some(10.0));
         // Missing totals fall back to avg10, retaining the ten-second exit hold.
         for seconds in [9, 19, 20, 30] {
             let mut snap = snapshot(

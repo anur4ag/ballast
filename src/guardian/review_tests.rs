@@ -135,7 +135,7 @@ fn warm_to_critical_generic(
 fn freeze_failures_are_isolated_to_the_workload_that_actually_failed() {
     // Part A: a healthy first freeze, then a decision-log failure during the second freeze.
     let home = TestHome::new("review-log-failure");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -199,7 +199,7 @@ fn freeze_failures_are_isolated_to_the_workload_that_actually_failed() {
     // Part B: a fresh guardian/platform, this time failing `list_processes` mid-freeze -- proving
     // that failure rolls back only the workload it was in the middle of freezing.
     let home = TestHome::new("review-freeze-pass-failure");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -277,7 +277,7 @@ fn freeze_failures_are_isolated_to_the_workload_that_actually_failed() {
 #[test]
 fn thirty_seconds_of_unreadable_pressure_admits_normal_and_resumes_fifo() {
     let home = TestHome::new("review-pressure-unknown-fifo");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,
@@ -491,7 +491,7 @@ impl Platform for FakeIdentityCheck {
 #[test]
 fn resume_preserves_an_unreadable_identity_and_drops_a_confirmed_mismatch() {
     let home = TestHome::new("review-identity-revalidation");
-    let mut guardian = Guardian::new(
+    let mut guardian = new_guardian(
         home.0.clone(),
         "boot-1".into(),
         Mode::Enforce,

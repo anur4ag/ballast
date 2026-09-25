@@ -411,6 +411,30 @@ fn memory_and_cpu_metrics_are_nonzero_for_a_running_child() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn cpu_metrics_report_nanoseconds_for_a_timed_busy_child() {
+    let mut platform = NativePlatform::new().unwrap();
+    let mut child = ChildGuard(spawn_child("timed_cpu", "cpu_units"));
+    let stdout = child.0.stdout.take().unwrap();
+    let identity = platform
+        .list_processes(&Default::default(), &Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|p| p.identity.pid == child.0.id() as i32)
+        .unwrap()
+        .identity;
+    let before = platform.process_metrics(identity).unwrap().cpu_time_ns;
+    release_barrier(&mut child.0);
+    ready_payload(&read_status_line(stdout));
+    let after = platform.process_metrics(identity).unwrap().cpu_time_ns;
+    let elapsed = Duration::from_nanos(after - before);
+    assert!(
+        (0.25..0.50).contains(&elapsed.as_secs_f64()),
+        "300 ms CPU loop reported {elapsed:?}"
+    );
+}
+
 #[test]
 fn list_processes_only_samples_metrics_for_requested_identities() {
     let mut platform = NativePlatform::new().expect("NativePlatform::new");
@@ -769,6 +793,69 @@ fn macos_unrestricted_child_with_cleared_env_reports_known_empty() {
     );
 }
 
+// ticket 16: KERN_PROCARGS2's env section can be terminated by a single NUL
+// (no trailing empty-string double-NUL) depending on where it lands in the
+// buffer; a fixed marker length would only ever hit one alignment, so this
+// sweeps the marker's own byte length across a full 32-byte cycle to make
+// sure `read_environment` retains it exactly at every offset.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cleared_env_marker_survives_across_value_length_alignments() {
+    let platform = NativePlatform::new().expect("NativePlatform::new");
+    let exe = std::env::current_exe().expect("current_exe");
+
+    for len in 0..=32usize {
+        let marker = "M".repeat(len);
+        let mut child = Command::new(&exe)
+            .args(["env_clear_child", "--exact", "--ignored", "--nocapture"])
+            .env_clear()
+            .env(MARKER_ENV, &marker)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn env_clear_child (marker len {len}): {e}"));
+        let child_pid = child.id() as i32;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let guard = ChildGuard(child);
+        ready_payload(&read_status_line(stdout));
+
+        // No full list_processes scan: each spawn only needs its own identity.
+        let mut identity = None;
+        wait_until("env_clear child to be resolvable by pid", || {
+            identity = platform.process_parent(child_pid).map(|(id, _)| id);
+            identity.is_some()
+        });
+        let identity = identity.unwrap();
+
+        // SIGSTOP only this owned child; no other process is ever signaled.
+        platform
+            .send_signal(identity, Signal::Stop)
+            .unwrap_or_else(|e| panic!("SIGSTOP (marker len {len}): {e}"));
+
+        // Confirm the kernel has actually applied the stop before reading, the same
+        // waitpid(WUNTRACED|WNOHANG) acknowledgement `watching_a_child_forces_a_full_refresh_on_a_single_scan` uses.
+        wait_until("child to report stopped via waitpid", || {
+            let mut status = 0i32;
+            let waited =
+                unsafe { libc::waitpid(child_pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+            waited == child_pid && libc::WIFSTOPPED(status)
+        });
+
+        let env = platform
+            .read_environment(identity)
+            .unwrap_or_else(|| panic!("environment should be readable (marker len {len})"));
+        assert_eq!(
+            env.get(MARKER_ENV).map(String::as_str),
+            Some(marker.as_str()),
+            "marker of length {len} was not retained exactly, got {env:?}"
+        );
+
+        drop(guard); // SIGKILL + reap before the next iteration
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_child_renamed_to_invalid_utf8_stays_listed_and_signalable() {
@@ -1117,6 +1204,25 @@ fn child_helper() {
             writeln!(stdout, "READY").unwrap();
             stdout.flush().unwrap();
             spin_until(Instant::now() + Duration::from_secs(5));
+            sleep(CHILD_LIFETIME_CAP);
+        }
+        #[cfg(target_os = "macos")]
+        "timed_cpu" => {
+            read_barrier();
+            let cpu_time = || {
+                let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+                    0
+                );
+                Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+            };
+            let start = cpu_time();
+            while cpu_time() - start < Duration::from_millis(300) {
+                std::hint::spin_loop();
+            }
+            writeln!(stdout, "READY").unwrap();
+            stdout.flush().unwrap();
             sleep(CHILD_LIFETIME_CAP);
         }
         "listen4" => run_listener("127.0.0.1:0"),
