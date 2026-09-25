@@ -632,6 +632,10 @@ fn pressure_inputs_are_readable_without_root() {
             pressure.psi_some_avg10.is_some() && pressure.psi_full_avg10.is_some(),
             "memory_psi capability implies psi_some_avg10/psi_full_avg10"
         );
+        assert!(
+            pressure.psi_some_total_us.is_some() && pressure.psi_full_total_us.is_some(),
+            "memory PSI includes cumulative stall microseconds"
+        );
     }
     if capabilities.kernel_pressure {
         assert!(
