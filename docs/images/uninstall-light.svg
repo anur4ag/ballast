@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="577.6" height="397" viewBox="0 0 577.6 397">
+<title>Ballast live terminal capture</title>
+<rect width="577.6" height="397" rx="10" fill="#ffffff"/>
+<g font-family="Menlo,Consolas,monospace" font-size="14" xml:space="preserve">
+<text x="20" y="36" fill="#262626" font-weight="400" textLength="142.8" lengthAdjust="spacingAndGlyphs">Uninstall&#160;Ballast</text>
+<text x="20" y="57" fill="#262626" font-weight="400" textLength="218.4" lengthAdjust="spacingAndGlyphs">Found:&#160;Claude&#160;Code&#160;&#160;&#160;Codex</text>
+<text x="20" y="99" fill="#262626" font-weight="400" textLength="109.2" lengthAdjust="spacingAndGlyphs">Ballast&#160;will:</text>
+<text x="20" y="120" fill="#262626" font-weight="400" textLength="537.6" lengthAdjust="spacingAndGlyphs">&#160;&#160;1.&#160;[x]&#160;Resumes&#160;anything&#160;Ballast&#160;paused,&#160;then&#160;stops&#160;the&#160;service</text>
+<text x="20" y="141" fill="#262626" font-weight="400" textLength="436.8" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;~/Library/LaunchAgents/dev.ballast.daemon.plist</text>
+<text x="20" y="162" fill="#262626" font-weight="400" textLength="403.2" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;Keeps&#160;~/.ballast&#160;(add&#160;--purge&#160;to&#160;delete&#160;it)</text>
+<text x="20" y="183" fill="#262626" font-weight="400" textLength="344.4" lengthAdjust="spacingAndGlyphs">&#160;&#160;2.&#160;[x]&#160;Remove&#160;Ballast&#160;Claude&#160;Code&#160;hooks</text>
+<text x="20" y="204" fill="#262626" font-weight="400" textLength="235.2" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;~/.claude/settings.json</text>
+<text x="20" y="225" fill="#262626" font-weight="400" textLength="487.2" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;Backup:&#160;settings.json.ballast-2026-09-25T05-25-43.bak</text>
+<text x="20" y="246" fill="#262626" font-weight="400" textLength="428.4" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;Keeps&#160;your&#160;1&#160;other&#160;hook&#160;and&#160;all&#160;other&#160;settings</text>
+<text x="20" y="267" fill="#262626" font-weight="400" textLength="294" lengthAdjust="spacingAndGlyphs">&#160;&#160;3.&#160;[x]&#160;Remove&#160;Ballast&#160;Codex&#160;hooks</text>
+<text x="20" y="288" fill="#262626" font-weight="400" textLength="201.6" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;~/.codex/hooks.json</text>
+<text x="20" y="309" fill="#262626" font-weight="400" textLength="462" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;Backup:&#160;hooks.json.ballast-2026-09-25T05-25-43.bak</text>
+<text x="20" y="330" fill="#262626" font-weight="400" textLength="285.6" lengthAdjust="spacingAndGlyphs">&#160;&#160;&#160;&#160;&#160;Keeps&#160;all&#160;your&#160;other&#160;settings</text>
+<text x="20" y="372" fill="#262626" font-weight="400" textLength="260.4" lengthAdjust="spacingAndGlyphs">Continue?&#160;[Y]es&#160;/&#160;[d]iff&#160;/&#160;[n]o</text>
+</g>
+</svg>

@@ -44,13 +44,20 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    Install,
+    Install {
+        #[command(flatten)]
+        options: ballast::install::Options,
+    },
     Uninstall {
+        #[command(flatten)]
+        options: ballast::install::Options,
         /// Remove retained Ballast configuration, state and logs.
         #[arg(long)]
         purge: bool,
     },
     Doctor {
+        #[arg(long)]
+        json: bool,
         /// Submit a test desktop notification.
         #[arg(long)]
         notify: bool,
@@ -77,14 +84,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let command = Cli::parse().command;
     match command {
-        Command::Install => ballast::install::Installation::from_env()?.install()?,
-        Command::Uninstall { purge } => {
-            ballast::install::Installation::from_env()?.uninstall(purge)?
+        Command::Install { options } => {
+            std::process::exit(ballast::install::command(true, false, options))
         }
-        Command::Doctor { notify } => {
-            if !ballast::install::Installation::from_env()?.doctor(notify) {
-                std::process::exit(1);
-            }
+        Command::Uninstall { purge, options } => {
+            std::process::exit(ballast::install::command(false, purge, options))
+        }
+        Command::Doctor { notify, json } => {
+            std::process::exit(ballast::install::doctor_command(notify, json))
         }
         Command::Daemon => ballast::daemon::run(ballast::daemon::files::Paths::from_env()?)?,
         Command::Resume { target, .. } => {

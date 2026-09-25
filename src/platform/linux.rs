@@ -367,11 +367,21 @@ impl Platform for NativePlatform {
                 let mut parts = line.split_whitespace();
                 let kind = parts.next();
                 let avg10 = parts
+                    .clone()
                     .find_map(|s| s.strip_prefix("avg10="))
                     .and_then(|n| n.parse().ok());
+                let total = parts
+                    .find_map(|s| s.strip_prefix("total="))
+                    .and_then(|n| n.parse().ok());
                 match kind {
-                    Some("some") => inputs.psi_some_avg10 = avg10,
-                    Some("full") => inputs.psi_full_avg10 = avg10,
+                    Some("some") => {
+                        inputs.psi_some_avg10 = avg10;
+                        inputs.psi_some_total_us = total;
+                    }
+                    Some("full") => {
+                        inputs.psi_full_avg10 = avg10;
+                        inputs.psi_full_total_us = total;
+                    }
                     _ => {}
                 }
             }

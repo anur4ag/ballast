@@ -146,6 +146,8 @@ fn run_with_targets(
     unsafe {
         libc::umask(0o077);
     }
+    let binary = crate::install::invoked_binary()?;
+    let original_binary = binary_stamp(&std::fs::metadata(&binary)?);
     paths.prepare()?;
     let loaded_config = Config::load(&paths);
     let config = loaded_config.as_ref().cloned().unwrap_or_default();
@@ -366,6 +368,14 @@ fn run_with_targets(
                     }
                 })?;
             }
+            // A missing path may be the brief unlink/link window of a package upgrade.
+            if std::fs::metadata(&binary).is_ok_and(|m| binary_stamp(&m) != original_binary) {
+                log.write_line(&format!(
+                    "{} executable replaced; restarting through the user service",
+                    unix_ms()
+                ))?;
+                return Ok(());
+            }
             next_tick = started + observer.interval();
         }
         match requests.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
@@ -455,6 +465,16 @@ fn run_with_targets(
             }
         }
     }
+}
+
+fn binary_stamp(metadata: &std::fs::Metadata) -> (u64, u64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    )
 }
 
 pub fn unix_ms() -> u64 {

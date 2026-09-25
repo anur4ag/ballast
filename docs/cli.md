@@ -113,7 +113,7 @@ python3 spikes/verify_top.py
 ```
 
 This uses tmux, a temporary Ballast home, production IPC/admission/guardian code, synthetic pressure, and three test-owned sleep processes.
-It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/t09` directory, then verifies admission and resume after pressure returns to Normal.
+It captures 80-, 120- and 160-column light/dark panes under the ignored `spikes/out/` directory, then verifies admission and resume after pressure returns to Normal.
 The fixture accepts `exit` in its pressure file, thaws on normal exit, and also exits after 150 seconds.
 
 ## Effectiveness report
@@ -187,3 +187,92 @@ These comparisons show correlation, not causation.
 
 The on-disk object is `{schema_version, updated_at_ms, days}` with the same daily aggregates.
 Snapshot adds defaulted `today: {day, enforce, observe}`; each mode contains `freezes`, `holds`, nullable `median_wait_seconds`, `reclaimed_memory_bytes`, `reclaimed_processes`, `services_left_running`, `forced_resumes`, and `kills_blocked`.
+
+## Install, repair and uninstall
+
+`ballast install` previews the detected Claude Code and Codex configs and the per-user service before asking for consent.
+Agent detection uses the config directory or an executable on `PATH`.
+Enter or `y` applies; `n`, Escape or Ctrl-C cancels without writing.
+`d` opens the complete file diffs; arrows, Page Up/Down and Home/End scroll, and Enter or Escape returns.
+`c` opens an install checklist; arrows move, Space toggles and Enter confirms.
+The service can be unchecked, but hooks cannot work without a running service.
+The plan remains in terminal scrollback and inherits the terminal foreground and background, including with `NO_COLOR`.
+
+`ballast uninstall` previews hook removal and service shutdown with the same consent and diff flow.
+It resumes frozen work before removing the service and retains Ballast configuration, state and logs unless `--purge` is supplied.
+Approved uninstall always runs the independent stopped-process recovery sweep, even without a service file or journal.
+This can update runtime state and recovery logs even when no configuration changes or resumed work produce exit `2`.
+Backups of changed agent configs are retained alongside those configs, including with `--purge`.
+Unrelated hooks and settings remain intact.
+
+For either command, `--dry-run` prints the plan and complete unified diffs without writing anything.
+`--yes` applies without prompting and is appropriate only after the user has approved the changes.
+A non-terminal invocation without either flag refuses to write and describes this two-step consent flow.
+`--json` requires `--dry-run` or `--yes`, even in a terminal.
+Re-running install repairs outdated hooks and services and skips unchanged files without creating new backups.
+If files change after planning, installation refuses before writing; a failure during application reports the completed, failed and skipped steps.
+Run the command outside the sandbox or approve access when it reports blocked agent directories or service-manager commands.
+A partial install is never reported as success.
+
+After install, inline doctor checks verify the service, daemon, hooks, trust and platform access.
+Codex hook approval remains a user action through `/hooks`; Ballast never edits trust.
+Hooks take effect in new agent sessions, so changed hooks require restarting the current session.
+Desktop notifications are not sent by install or a normal doctor run; `ballast doctor --notify` explicitly requests a test notification.
+
+### Installer JSON schema version 1
+
+`ballast install --dry-run --json` and `ballast uninstall --dry-run --json` emit one plan object on stdout.
+Paths in JSON are absolute; human plans abbreviate the home directory as `~`.
+Treat plans as private because preserved agent settings appear in the diff.
+Consumers must ignore unknown fields; all plan, item, file, result and check structs deserialize missing additive fields with serde defaults.
+
+| Plan field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1` |
+| `operation` | `install` or `uninstall` |
+| `detected_agents` | Array of `claude` and/or `codex` |
+| `items` | Ordered service, agent-hook and optional purge items |
+| `requires_user_action` | User-facing instructions for Codex approval and new agent sessions |
+| `current_session_needs_restart` | Whether planned hook changes require a new agent session |
+
+Each item has string `id`, `purpose` and `detail`, booleans `selected` and `changed`, integer `existing_hooks_kept`, and a `files` array.
+Each file has `path`, nullable `before` and `after` strings, a full-file unified `diff`, and nullable absolute `backup` path.
+Null `before` creates a file and null `after` removes one.
+Equal `before` and `after` means no write or backup.
+The backup name uses local time, for example `settings.json.ballast-2026-09-25T10-02-41.bak`, with a numeric suffix only when that name already exists.
+It is chosen during planning and is the name used during application of that plan.
+Uninstall preserves backups from both this naming scheme and older versions.
+A later command computes a fresh plan and fresh backup names from current files.
+Service items also describe private runtime, state and log directories; purge items identify the entire Ballast data directory to remove.
+Runtime files created by the daemon are not agent configuration diffs.
+
+`ballast install --yes --json` and `ballast uninstall --yes --json` emit a result object:
+
+| Result field | Meaning |
+| --- | --- |
+| `schema_version`, `operation` | Version `1` and requested operation |
+| `status` | `success`, `no_change`, `refused`, `invalid` or `partial_failure` |
+| `items` | Objects containing `id`, `status` (`applied`, `skipped`, `failed`) and explanatory `reason` |
+| `doctor` | Check objects containing `name`, `status` and `detail` |
+| `next_steps` | User-facing instructions; agents must report these honestly |
+| `current_session_needs_restart` | Whether applied hook changes require a new agent session |
+
+`ballast doctor --json` emits `{ "schema_version": 1, "operation": "doctor", "status": "healthy" | "attention_required", "checks": [...] }`.
+Check statuses are `ok`, `failed`, `skipped` for deliberately unchecked components, or `action_required` for outstanding Codex trust.
+Inline verification skips components excluded through the checklist, and selected-plan success reflects only the selected operations.
+Unchecked service setup leaves a warning that installed hooks stay inactive until a daemon runs.
+Standalone doctor still checks every detected component.
+Install can succeed while Codex approval remains outstanding; doctor exits nonzero until the user completes it.
+An invalid environment emits the same `invalid` result envelope as install and uninstall.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Successful application, dry run, or healthy doctor |
+| `1` | Doctor found a failed check or required user action |
+| `2` | Apply found nothing to change; also used by clap for invalid CLI arguments |
+| `3` | Consent refused, cancelled, or unavailable without a terminal |
+| `4` | Invalid or unsafe environment/configuration; no writes by install/uninstall |
+| `5` | Application or verification failed; some steps may already have applied |
+
+Use the JSON `status` to distinguish `no_change` from CLI argument errors, which produce no result object.
+See [Install with an agent](install-with-an-agent.md) for the full consent workflow.

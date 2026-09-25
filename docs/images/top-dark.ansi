@@ -1,0 +1,19 @@
+[1mBALLAST  [38;2;208;68;61mCRITICAL[0m · Enforce · 2 frozen · 1 held
+MEM  [[1m[38;2;208;68;61m|||||||||||||||[0m···············] 8.0 GiB / 16.0 GiB    SWAP [[1m[38;2;163;90;165m||||||||[0m·······················] 1.0 GiB / 4.0 GiB
+kernel warn · pageout ? MiB/s · swapout ? MiB/s
+Guardian: Waiting five seconds before another freeze decision.
+[1mPAUSED & WAITING[0m
+[1m[38;2;50;121;186mFROZEN  [0mclaude/agent-b  synthetic workload 3  8s  memory pressure
+[1m[38;2;50;121;186mFROZEN  [0mcodex/agent-a  synthetic workload 2  3s  memory pressure
+[1m[38;2;163;90;165mHELD    [0mclaude/agent-b  [synthetic held command]  8s  memory pressure
+[1mFLEET  1 owner · 2 agents · 3 workloads[0m
+[1mSTATE      CLASS      CPU%         MEM     AGE LABEL                                                      ID
+                                               ▾ TUI verification fleet
+thinking   agent       0.0        5.0G       - ├ codex                                                    agent-a
+[0mrunning    batch       0.0        3.0G      8s │ ├ synthetic workload 1                                   fixture-work-1
+[1m[38;2;50;121;186mFROZEN    [0m batch       0.0        2.0G      8s │ └ synthetic workload 2                                   fixture-work-2
+[1midle       agent       0.0        1.0G       - └ claude                                                   agent-b
+[38;2;50;121;186mFROZEN    [0m batch       0.0        1.0G      8s   └ synthetic workload 3                                   fixture-work-3
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+q quit  j/k scroll  PgUp/PgDn  Home/End · CPU: one core = 100% · ? unknown · ~ partial
+ballast resume <id>|--all · ballast stop <id> · rows 1-12 / 12

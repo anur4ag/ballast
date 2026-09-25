@@ -77,6 +77,10 @@ pub struct PressureInputs {
     pub swapouts: Option<u64>,
     pub psi_some_avg10: Option<f64>,
     pub psi_full_avg10: Option<f64>,
+    #[serde(default)]
+    pub psi_some_total_us: Option<u64>,
+    #[serde(default)]
+    pub psi_full_total_us: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -11,6 +11,8 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
         Self(Installation {
             paths: Paths {
                 base: home.join(".ballast"),
@@ -67,8 +69,19 @@ fn config_round_trip_preserves_other_hooks_and_backs_up_only_changes() {
     for (path, agent) in fixture.0.config_files() {
         fixture.0.hooks_current(&path, agent).unwrap();
     }
+    for (path, _) in fixture.0.config_files() {
+        fs::write(
+            path.with_extension("json.ballast-1790292406716665000.bak"),
+            b"legacy backup",
+        )
+        .unwrap();
+    }
     fixture.merge(false);
     for (path, _) in fixture.0.config_files() {
+        assert_eq!(
+            fs::read(path.with_extension("json.ballast-1790292406716665000.bak")).unwrap(),
+            b"legacy backup"
+        );
         assert_eq!(ConfigEdit::read(path).unwrap().value, unrelated);
     }
     fixture.merge(false);
@@ -109,7 +122,7 @@ fn malformed_second_config_never_writes_the_first_or_the_service() {
         "{\"hooks\":{\"Stop\":[{\"matcher\":false,\"hooks\":[]}]}}",
     ] {
         atomic_write(&codex, malformed.as_bytes()).unwrap();
-        let error = fixture.0.install().unwrap_err().to_string();
+        let error = fixture.0.plan(true, false).err().unwrap().to_string();
         assert!(error.contains("malformed"));
         assert_eq!(fs::read(&claude).unwrap(), b"{\"keep\": true}");
         assert_eq!(fs::read(&codex).unwrap(), malformed.as_bytes());
@@ -187,14 +200,26 @@ fn hook_command_survives_shell_metacharacters_and_sets_the_selected_home() {
     fs::set_permissions(&fixture.0.binary, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir_all(&fixture.0.paths.base).unwrap();
     let group = fixture.0.hook_group("PreToolUse", "codex");
-    assert!(
+    let run = || {
         Command::new("sh")
             .arg("-c")
             .arg(group["hooks"][0]["command"].as_str().unwrap())
-            .status()
+            .output()
             .unwrap()
-            .success()
-    );
+    };
+    assert!(run().status.success());
+    fs::write(
+        &fixture.0.binary,
+        b"#!/bin/sh\nprintf pass-through\nexit 23\n",
+    )
+    .unwrap();
+    let output = run();
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(output.stdout, b"pass-through");
+    fs::remove_file(&fixture.0.binary).unwrap();
+    let output = run();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
 }
 
 #[test]
@@ -247,10 +272,10 @@ fn long_socket_path_is_rejected_before_any_install_writes() {
     ));
     fixture.0.validate().unwrap();
     fixture.0.paths.base.as_mut_os_string().push("x");
-    let error = fixture.0.install().unwrap_err().to_string();
+    let error = fixture.0.plan(true, false).err().unwrap().to_string();
     assert!(error.contains(&format!("shorter than {limit} bytes")));
     assert!(error.contains("BALLAST_HOME"));
-    assert_eq!(fs::read_dir(&fixture.0.home).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&fixture.0.home).unwrap().count(), 2);
 }
 
 #[test]
@@ -279,5 +304,120 @@ fn systemd_restarts_are_unlimited_with_bounded_backoff() {
         "RestartMaxDelaySec=30\n",
     ] {
         assert!(service.contains(directive));
+    }
+}
+
+#[test]
+fn invoked_path_keeps_the_symlink_across_a_cellar_upgrade() {
+    let fixture = Fixture::new();
+    let bin = fixture.0.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let link = bin.join("ballast");
+    for version in ["1", "2"] {
+        let target = fixture
+            .0
+            .home
+            .join(format!("Cellar/ballast/{version}/ballast"));
+        atomic_write(&target, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for invoked in [Path::new("ballast"), link.as_path()] {
+            assert_eq!(
+                resolve_invocation(invoked, bin.as_os_str()).unwrap(),
+                Some(link.clone())
+            );
+        }
+    }
+}
+
+#[test]
+fn approved_plan_is_exact_and_rejects_later_changes_before_any_write() {
+    let fixture = Fixture::new();
+    let original = b"{\"model\":\"keep\"}\n";
+    let claude = fixture.0.claude_dir.join("settings.json");
+    fs::write(&claude, original).unwrap();
+    let plan = fixture.0.plan(true, false).unwrap();
+    let item = plan.items.iter().find(|i| i.id == "claude").unwrap();
+    let file = &item.files[0];
+    assert!(!file.backup.as_ref().unwrap().exists());
+    let backup_name = file
+        .backup
+        .as_ref()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let stamp = backup_name
+        .strip_prefix("settings.json.ballast-")
+        .unwrap()
+        .strip_suffix(".bak")
+        .unwrap();
+    assert_eq!(stamp.len(), 19);
+    assert_eq!(&stamp[10..11], "T");
+    assert_eq!(&stamp[4..5], "-");
+    file.save().unwrap();
+    assert_eq!(
+        fs::read_to_string(&claude).unwrap(),
+        file.after.as_ref().unwrap().as_str()
+    );
+    assert_eq!(fs::read(file.backup.as_ref().unwrap()).unwrap(), original);
+    let (_, code) = fixture.0.apply(&plan);
+    assert_eq!(code, 4);
+    assert!(!fixture.0.service_file().exists());
+    assert!(!fixture.0.codex_dir.join("hooks.json").exists());
+    let repaired = fixture.0.plan(true, false).unwrap();
+    assert!(
+        !repaired
+            .items
+            .iter()
+            .find(|i| i.id == "claude")
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn install_and_uninstall_plans_wrap_without_losing_content() {
+    let fixture = Fixture::new();
+    fixture.merge(true);
+    for installing in [true, false] {
+        let plan = fixture.0.plan(installing, false).unwrap();
+        let text = ui::plan_text(&plan, &fixture.0.home);
+        for width in [60, 80, 120] {
+            let lines = ui::wrapped(&text, width);
+            assert!(lines.iter().all(|l| l.chars().count() <= width as usize));
+            let condensed = |s: &str| s.split_whitespace().collect::<String>();
+            assert_eq!(condensed(&lines.join("\n")), condensed(&text));
+            assert!(lines.len() > 5);
+            for original in text.lines().filter(|line| line.starts_with("     ")) {
+                assert!(
+                    ui::wrapped(original, width)
+                        .iter()
+                        .all(|line| line.starts_with("     "))
+                );
+            }
+            let hook = ui::wrapped(
+                "     + PreToolUse (Bash, Monitor): holds heavy commands under memory pressure",
+                width,
+            );
+            assert!(hook.iter().skip(1).all(|line| line.starts_with("       ")));
+            let numbered = ui::wrapped(
+                "  1. [x] Resumes anything Ballast paused, then stops the service",
+                width,
+            );
+            assert!(
+                numbered
+                    .iter()
+                    .skip(1)
+                    .all(|line| line.starts_with("         "))
+            );
+            let footer = ui::wrapped(
+                "Never sends data anywhere, kills your own apps, or kills a running agent.",
+                width,
+            );
+            assert!(footer.iter().skip(1).all(|line| line.starts_with("  ")));
+        }
     }
 }
