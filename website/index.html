@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="color-scheme" content="dark">
+		<title>Ballast</title>
+		<meta name="description" content="Keep your machine responsive while your fleet of coding agents runs.">
+		<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' rx='3.5' fill='%23151516'/%3E%3Cpath fill='%23e8e8ea' d='M3 3h1v9h8V3h1v10H3zM5 8h6v3H5z'/%3E%3C/svg%3E">
+		<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+		<style>
+			:root {
+				--color-bg: #151516;
+				--color-fg: #e8e8ea;
+				--color-fg3: #8f8f96;
+				/* The ballast top palette (src/cli/top.rs). */
+				--color-critical: rgb(208, 68, 61);
+				--color-frozen: rgb(50, 121, 186);
+				--color-held: rgb(163, 90, 165);
+				/* 'Berkeley Mono' applies only where installed locally; nothing is downloaded. */
+				--font-mono:
+					'Berkeley Mono', ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo, Monaco,
+					'Cascadia Mono', Consolas, 'Liberation Mono', monospace;
+			}
+			html {
+				background-color: var(--color-bg);
+				-webkit-font-smoothing: antialiased;
+				-moz-osx-font-smoothing: grayscale;
+			}
+			::selection {
+				background: #ffff00;
+				color: #000000;
+			}
+			a {
+				color: inherit;
+			}
+			body {
+				background-color: var(--color-bg);
+				color: var(--color-fg);
+				font-family: var(--font-mono);
+				font-size: 12px;
+				line-height: 20px;
+				padding: 40px;
+				margin: 0;
+			}
+			pre, code {
+				font-family: inherit;
+				font-size: inherit;
+				line-height: inherit;
+			}
+			pre {
+				white-space: pre-wrap;
+				overflow-wrap: anywhere;
+			}
+			.header {
+				display: inline-block;
+				line-height: 18px;
+			}
+			.cursor {
+				animation: flash 1s infinite;
+			}
+			@keyframes flash {
+				0%, 50% { opacity: 1; }
+				51%, 100% { opacity: 0; }
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.cursor { animation: none; }
+			}
+			.mono-h1, .mono-h2, .state {
+				font-weight: 700;
+				text-transform: uppercase;
+			}
+			.mono-h1::before {
+				content: '# ';
+				color: var(--color-fg3);
+			}
+			.mono-h2::before {
+				content: '## ';
+				color: var(--color-fg3);
+			}
+			.critical { color: var(--color-critical); }
+			.frozen { color: var(--color-frozen); }
+			.held { color: var(--color-held); }
+			.dim {
+				color: var(--color-fg3);
+			}
+			/* A terminal capture keeps its columns on narrow screens and scrolls instead. */
+			.capture {
+				display: block;
+				white-space: pre;
+				overflow-x: auto;
+			}
+			.spaced {
+				display: inline-block;
+				margin-top: 80px;
+			}
+		</style>
+	</head>
+	<body>
+		<pre style="margin: 0; max-width: 480px;"><code><span class="header">BALLAST <span class="cursor" aria-hidden="true">█</span>
+KEEP YOUR MACHINE RESPONSIVE WHILE YOUR FLEET OF AGENTS RUNS.
+v0.1.0-alpha.3</span>
+
+<span class="spaced">~*~ Open source · MIT or Apache-2.0 ~*~</span>
+
+<span class="mono-h1">About Ballast</span>
+
+Ballast is a small local daemon for machines that run many coding agents at once: builds, tests and dev servers in parallel.
+
+It knows which processes belong to which agent. When memory or CPU runs out, it slows or pauses agent work and leaves the rest of your machine alone.
+
+<span class="capture"><span class="dim">$ ballast top</span>
+<span class="state">Ballast</span>  <span class="state critical">Critical</span> · 2 frozen · 1 held
+MEM [<span class="state critical">||||||||||||</span>··] 13.9 GiB / 16.0 GiB
+<span class="state frozen">Frozen</span>  claude  cargo test    8s
+<span class="state frozen">Frozen</span>  codex   next build    3s
+<span class="state held">Held</span>    claude  npm run e2e   8s</span>
+<span class="mono-h2">What it does</span>
+
+- Holds an agent's next heavy command while memory is tight.
+- Pauses agent builds when memory runs out. Never kills them.
+- Backgrounds agent builds while the CPU is saturated (macOS).
+- Fails open. If Ballast stops, your agents keep working.
+
+<span class="mono-h2">Install</span>
+
+$ brew install anur4ag/tap/ballast
+$ ballast install
+
+Shows every file it will change and backs it up before asking.
+Works with Claude Code and Codex on macOS 11+ and Linux.
+
+- [Debian and Ubuntu](<a href="https://github.com/anur4ag/ballast#install">https://github.com/anur4ag/ballast#install</a>)
+
+<span class="mono-h2">Privacy</span>
+
+No telemetry, no account, no cloud. Data stays in ~/.ballast.
+
+<span class="mono-h2">Source</span>
+
+- [GitHub](<a href="https://github.com/anur4ag/ballast">https://github.com/anur4ag/ballast</a>)
+- [Docs](<a href="https://github.com/anur4ag/ballast/tree/main/docs">https://github.com/anur4ag/ballast/tree/main/docs</a>)
+- [Releases](<a href="https://github.com/anur4ag/ballast/releases">https://github.com/anur4ag/ballast/releases</a>)
+</code></pre>
+	</body>
+</html>

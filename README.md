@@ -1,4 +1,4 @@
-# Ballast
+# <img src="docs/images/icon.svg" width="32" height="32" alt="" align="top"> Ballast
 
 Keep your laptop responsive while coding agents work in parallel.
 
