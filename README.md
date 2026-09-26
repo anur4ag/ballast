@@ -2,6 +2,8 @@
 
 Keep your laptop responsive while coding agents work in parallel.
 
+[ballastd.pages.dev](https://ballastd.pages.dev)
+
 Ballast watches agent processes and memory pressure, holds heavy commands when headroom is low, and pauses workloads before your machine starts thrashing.
 Install once, then keep using your agents as usual.
 
@@ -53,7 +55,7 @@ For scripts, preview with `ballast install --dry-run --json`, then apply an appr
 Homebrew and APT upgrades restart the daemon automatically; no second install command is needed.
 
 Prefer asking your coding agent?
-Paste: **“Follow https://github.com/anur4ag/ballast/blob/main/docs/install-with-an-agent.md to install Ballast for me; show me the exact plan before applying it.”**
+Paste: **“Follow https://raw.githubusercontent.com/anur4ag/ballast/main/docs/install-with-an-agent.md to install Ballast for me; show me the exact plan before applying it.”**
 
 [Manual installation and platform requirements](docs/platforms.md) · [Install with an agent](docs/install-with-an-agent.md)
 
