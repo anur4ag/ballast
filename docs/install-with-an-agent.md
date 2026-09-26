@@ -27,6 +27,10 @@ On macOS with Homebrew:
 brew install anur4ag/tap/ballast
 ```
 
+If `command -v brew` finds nothing, Homebrew is not installed.
+Ask the user to install it from https://brew.sh themselves, because its installer asks for their password.
+Once `brew` is on `PATH` in a new shell, run the command above.
+
 On Debian or Ubuntu, show these privileged steps to the user and wait for their approval or ask them to run the commands themselves:
 
 ```sh
